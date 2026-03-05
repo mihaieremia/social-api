@@ -72,6 +72,6 @@ async fn main() {
 
     // Post-shutdown cleanup
     tracing::info!("Draining connections...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(config.shutdown_timeout_secs)).await;
     tracing::info!("Social API stopped");
 }

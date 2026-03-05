@@ -69,15 +69,17 @@ impl Config {
             );
         }
 
-        let http_port: u16 = http_port_str
-            .parse()
-            .unwrap_or_else(|_| panic!("HTTP_PORT must be a valid port number, got: {http_port_str}"));
+        let http_port: u16 = http_port_str.parse().unwrap_or_else(|_| {
+            panic!("HTTP_PORT must be a valid port number, got: {http_port_str}")
+        });
 
         // Build content API URL map from CONTENT_API_{TYPE}_URL env vars
         let content_api_urls = build_content_api_urls();
 
         if content_api_urls.is_empty() {
-            panic!("No content API URLs configured. Set at least one CONTENT_API_{{TYPE}}_URL env var (e.g., CONTENT_API_POST_URL)");
+            panic!(
+                "No content API URLs configured. Set at least one CONTENT_API_{{TYPE}}_URL env var (e.g., CONTENT_API_POST_URL)"
+            );
         }
 
         Self {
@@ -119,11 +121,6 @@ impl Config {
             ),
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
         }
-    }
-
-    /// Returns the set of known content types from configuration.
-    pub fn content_types(&self) -> Vec<String> {
-        self.content_api_urls.keys().cloned().collect()
     }
 
     /// Check if a content type is registered.
@@ -172,10 +169,10 @@ fn build_content_api_urls() -> HashMap<String, String> {
     ];
 
     for (env_var, content_type) in &known_types {
-        if let Ok(url) = env::var(env_var) {
-            if !url.is_empty() {
-                urls.insert(content_type.to_string(), url);
-            }
+        if let Ok(url) = env::var(env_var)
+            && !url.is_empty()
+        {
+            urls.insert(content_type.to_string(), url);
         }
     }
 
@@ -191,10 +188,10 @@ fn build_content_api_urls() -> HashMap<String, String> {
                 .and_then(|s| s.strip_suffix("_URL"))
                 .map(|s| s.to_lowercase());
 
-            if let Some(type_name) = type_name {
-                if !value.is_empty() {
-                    urls.insert(type_name, value);
-                }
+            if let Some(type_name) = type_name
+                && !value.is_empty()
+            {
+                urls.insert(type_name, value);
             }
         }
     }

@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, sqlx::FromRow)]
 pub struct LikeRow {
     pub id: i64,
+    #[allow(dead_code)]
     pub user_id: Uuid,
     pub content_type: String,
     pub content_id: Uuid,
