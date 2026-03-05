@@ -28,78 +28,61 @@ social-api/                      # Root
 main.rs                          # Entry: config, pools, server, shutdown
 config.rs                        # Env-based config with fail-fast
 server.rs                        # Axum Router + middleware layers
-state.rs                         # AppState (Arc<Inner> with pools, services, config)
+state.rs                         # AppState (Arc<AppStateInner>: db, cache, config, http_client, like_service, token_validator, profile_breaker, shutdown_token, inflight_count)
 shutdown.rs                      # SIGTERM handler, drain, SSE close
+db.rs                            # DbPools (writer + reader PgPool)
+logging.rs                       # JSON tracing-subscriber init
+openapi.rs                       # utoipa OpenAPI spec + Swagger UI
 
-handlers/                        # HTTP layer (thin, delegates to services)
-  likes.rs                       # like, unlike, get_count, get_status
-  batch.rs                       # batch_counts, batch_statuses
-  user_likes.rs                  # paginated user likes
-  leaderboard.rs                 # top liked content
+handlers/
+  likes.rs                       # ALL like endpoints: like, unlike, get_count, get_status, get_user_likes, batch_counts, batch_statuses, get_leaderboard
   stream.rs                      # SSE endpoint
   health.rs                      # /health/live, /health/ready
+  metrics_handler.rs             # /metrics (PrometheusHandle)
 
-extractors/                      # Axum custom extractors
-  auth.rs                        # AuthUser (Bearer -> user_id via Profile API)
-  content_path.rs                # ContentPath (validates type + id)
-  pagination.rs                  # CursorParams
+extractors/
+  auth.rs                        # AuthUser (Bearer token -> circuit-breaker -> Profile API -> user_id)
+  content_path.rs                # ContentPath (validates type in registry + id as UUID)
 
-middleware/                      # Tower layers
+middleware/
   request_id.rs                  # X-Request-Id generation
-  logging.rs                     # Structured request/response logging
-  metrics.rs                     # Prometheus collection
-  rate_limit.rs                  # Redis sliding window
+  metrics.rs                     # Prometheus HTTP metrics collection
+  rate_limit.rs                  # Lua sliding-window rate limit (write=per-token-hash, read=per-IP-hash)
+  inflight.rs                    # In-flight counter for graceful shutdown drain
+  error_context.rs               # Patches request_id into error responses after handler runs
 
-services/                        # Business logic (no HTTP concerns)
-  like_service.rs                # Core like/unlike, count, status, batch
-  leaderboard_service.rs         # ZSET reads, DB fallback
-  stream_service.rs              # Redis Pub/Sub -> broadcast
-  health_service.rs              # Dependency checks
+services/
+  like_service.rs                # ALL business logic: like, unlike, count, status, batch, leaderboard, cursor pagination
 
-repositories/                    # Data access (raw SQL via sqlx)
-  like_repository.rs             # CRUD on likes table
-  like_count_repository.rs       # Atomic INCR/DECR on like_counts
-  leaderboard_repository.rs      # Time-windowed aggregation
+repositories/
+  like_repository.rs             # ALL SQL: insert_like, delete_like, get_count, get_status, get_user_likes, get_leaderboard
 
-cache/                           # Redis cache layer
-  manager.rs                     # Get/set/del with graceful fallback
-  like_count_cache.rs            # Single + batch, stampede protection
-  content_cache.rs               # Content validation caching
-  leaderboard_cache.rs           # Redis Sorted Sets
+cache/
+  manager.rs                     # CacheManager: get/set/del/incr/decr/mget/mset_ex/publish/zrevrange/replace_sorted_set/set_nx
 
-clients/                         # External HTTP clients
-  content_client.rs              # ContentValidator trait + HTTP impl
-  profile_client.rs              # TokenValidator trait + HTTP impl
-  circuit_breaker.rs             # Generic state machine
+clients/
+  content_client.rs              # ContentValidator trait + HttpContentValidator
+  profile_client.rs              # TokenValidator trait + HttpTokenValidator
+  circuit_breaker.rs             # Generic state machine (Closed/HalfOpen/Open)
 
-domain/                          # Framework-free domain types
-  content_type.rs                # Registry (config-driven, zero-code addition)
-  like.rs                        # Like entity, LikeEvent
-  cursor.rs                      # Base64 encode/decode (timestamp+id)
-  time_window.rs                 # TimeWindow enum
-  user.rs                        # AuthenticatedUser
+tasks/
+  leaderboard_refresh.rs         # Periodic ZSET rebuild; also warms cache on startup
 
-errors/
-  app_error.rs                   # AppError -> HTTP response mapping
-
-metrics/
-  registry.rs                    # Prometheus definitions
-
-tasks/                           # Background tokio tasks
-  leaderboard_refresh.rs         # Periodic ZSET rebuild from DB
-  cache_warmer.rs                # Startup warm for leaderboard
+shared crate (crates/shared/src/):
+  types.rs                       # All domain types: AuthenticatedUser, TimeWindow, Like, LikeEvent, request/response structs
+  errors.rs                      # AppError enum, ErrorCode, ApiError JSON envelope
+  cursor.rs                      # Base64url encode/decode (timestamp+id)
 ```
 
 ### Data Flow
 ```
-Request -> rate_limit -> request_id -> logging -> metrics -> handler
-  handler -> extractor (auth/content validation)
+Request -> inflight -> request_id -> error_context -> metrics -> rate_limit -> handler
+  handler -> extractor (auth via profile_breaker + Profile API; content type registry check)
   handler -> service (business logic)
-    service -> cache (Redis, graceful fallback)
-    service -> repository (SQLx, writer/reader pools)
-    service -> client (external APIs via circuit breaker)
-    service -> event broadcaster (Redis Pub/Sub for SSE)
-  handler -> JSON response
+    service -> cache (Redis, graceful fallback to DB on miss/error)
+    service -> repository (SQLx, writer pool for mutations, reader pool for reads)
+    service -> content_breaker -> ContentValidator (HTTP Content API, cached)
+  handler -> JSON response (error_context patches request_id into error bodies)
 ```
 
 ## Database Schema
@@ -118,8 +101,8 @@ CREATE TABLE likes (
 CREATE INDEX idx_likes_user_created ON likes (user_id, created_at DESC, id DESC);
 -- Count aggregation fallback
 CREATE INDEX idx_likes_content ON likes (content_type, content_id);
--- Time-windowed leaderboard
-CREATE INDEX idx_likes_created_at ON likes (created_at);
+-- Time-windowed leaderboard (BRIN: ideal for append-only timestamps)
+CREATE INDEX idx_likes_created_at ON likes USING brin (created_at) WITH (pages_per_range = 32);
 ```
 
 ### like_counts table (materialized counter)
@@ -140,41 +123,30 @@ CREATE TABLE like_counts (
 
 | Key Pattern | Type | TTL | Purpose |
 |---|---|---|---|
-| `lc:{type}:{id}` | STRING | 300s | Like count (INCR/DECR atomic) |
+| `lc:{type}:{id}` | STRING | 300s | Like count (conditional INCR/DECR via Lua) |
 | `cv:{type}:{id}` | STRING | 3600s valid, 60s invalid | Content validation cache |
-| `rl:w:{user_id}` | ZSET | 120s | Write rate limit (sliding window) |
-| `rl:r:{ip}` | ZSET | 120s | Read rate limit (sliding window) |
-| `lb:{window}:{type}` | ZSET | 120s | Leaderboard (score=count) |
+| `rl:w:{fnv1a_hash(token)}` | ZSET | window+10s | Write rate limit (30/min sliding window) |
+| `rl:r:{fnv1a_hash(ip)}` | ZSET | window+10s | Read rate limit (1000/min sliding window) |
+| `lb:{window}` | ZSET | no TTL | Global leaderboard per window (score=count, member="{type}:{id}"); content_type filter in app |
 | `sse:{type}:{id}` | PUB/SUB | -- | SSE event channel |
 
 ### Stampede Protection
-Lock-based (SET NX with 5s TTL). On cache miss: acquire lock, fetch from DB, populate cache, release. Losers wait 50ms and retry cache, then fallback to DB.
+Lock-based (SET NX with 5s TTL). On count cache miss: acquire lock, fetch from DB, populate cache, release. Losers wait 50ms and retry cache, then fallback to DB.
 
 ### Cache Warming
-On startup: trigger leaderboard refresh for all windows before readiness probe returns 200. Like counts use lazy population (cache-aside on first access).
+On startup: leaderboard refresh task runs immediately before entering the periodic loop, populating `lb:{window}` ZSETs for all time windows (24h, 7d, 30d, all). Like counts use lazy population (cache-aside on first access).
 
 ## Key Traits (Extensibility)
 
 ```rust
-// Adding new content type = config only (env var)
-pub struct ContentTypeRegistry { types: HashMap<String, ContentTypeConfig> }
-
 // Transport-swappable (HTTP today, gRPC tomorrow)
 #[async_trait]
 pub trait ContentValidator: Send + Sync { ... }
 #[async_trait]
 pub trait TokenValidator: Send + Sync { ... }
-
-// Testable via mockall
-#[async_trait]
-pub trait LikeRepository: Send + Sync { ... }
-#[async_trait]
-pub trait LikeCountRepository: Send + Sync { ... }
-#[async_trait]
-pub trait LikeCountCache: Send + Sync { ... }
-#[async_trait]
-pub trait EventBroadcaster: Send + Sync { ... }
 ```
+
+Repositories are plain async functions (not traits). Cache is a concrete `CacheManager` struct (not a trait). Content type registry is config-driven: adding a new type requires only a `CONTENT_API_{TYPE}_URL` env var — zero code changes.
 
 ## Cursor Pagination
 Encodes `{"t":"2026-02-02T17:00:00Z","id":12345}` as base64url. Query uses `WHERE (created_at, id) < ($cursor_ts, $cursor_id)` for index-seekable pagination. Fetch limit+1 rows to detect has_more.
@@ -208,9 +180,10 @@ Encodes `{"t":"2026-02-02T17:00:00Z","id":12345}` as base64url. Query uses `WHER
 | uuid, chrono, base64, thiserror | Utilities |
 | tokio (full) | Async runtime |
 | tower + tower-http | Middleware |
+| utoipa + utoipa-swagger-ui | OpenAPI spec + Swagger UI |
 
 ## Docker
 
-- **Dockerfile:** Multi-stage (rust:latest builder -> debian:bookworm-slim). Non-root user. HEALTHCHECK.
-- **docker-compose.yml:** social-api, postgres:16, redis:7, mock-services (4 aliases on ports 8081-8084). depends_on with health checks.
+- **Dockerfile:** Multi-stage (rust:latest builder -> debian:trixie-slim). Non-root user. HEALTHCHECK.
+- **docker-compose.yml:** social-api, postgres:16, redis:7-alpine, mock-services (one binary on port 8081 serves all content APIs and profile API). depends_on with health checks.
 - **`docker compose up --build`** starts everything.

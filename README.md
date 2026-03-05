@@ -36,14 +36,13 @@ social-api/
 ### Data Flow
 
 ```
-Request -> request_id -> metrics -> rate_limit -> handler
-  handler -> auth extractor (Bearer -> Profile API -> user_id)
+Request -> inflight -> request_id -> error_context -> metrics -> rate_limit -> handler
+  handler -> extractor (auth via profile_breaker + Profile API; content type registry check)
   handler -> service (business logic)
-    service -> cache (Redis, graceful fallback)
-    service -> repository (SQLx, writer/reader pools)
-    service -> client (Content API via circuit breaker)
-    service -> Redis Pub/Sub (SSE broadcasting)
-  handler -> JSON response
+    service -> cache (Redis, graceful fallback to DB on miss/error)
+    service -> repository (SQLx, writer pool for mutations, reader pool for reads)
+    service -> content_breaker -> ContentValidator (HTTP Content API, cached)
+  handler -> JSON response (error_context patches request_id into error bodies)
 ```
 
 ### Key Design Decisions
@@ -52,7 +51,7 @@ Request -> request_id -> metrics -> rate_limit -> handler
 |---|---|---|
 | Like counts | Separate `like_counts` table | O(1) reads, avoids COUNT(*) on hot path. Extra write cost acceptable for 80/20 read/write. |
 | Pagination | Cursor-based (timestamp+id) | Index-seekable, stable under concurrent writes, no row skipping at depth. |
-| Caching | Redis cache-aside + stampede locks | SET NX with 5s TTL prevents thundering herd on popular content. |
+| Caching | Redis cache-aside + stampede lock | SET NX with 5s TTL on cache miss — only one fetcher hits DB, others wait 50ms then retry cache. Like count updates use conditional Lua scripts (INCR/DECR only if key exists) to prevent ghost counts. |
 | SSE | Redis Pub/Sub | Multi-replica support. Each instance subscribes to relevant channels. |
 | Content types | Config-driven registry | Adding new type = one env var. Zero code changes. |
 | External clients | Trait-based abstraction | Transport-swappable (HTTP -> gRPC) without rewriting business logic. |
@@ -73,6 +72,8 @@ Request -> request_id -> metrics -> rate_limit -> handler
 | GET | `/health/live` | No | Liveness probe |
 | GET | `/health/ready` | No | Readiness probe |
 | GET | `/metrics` | No | Prometheus metrics |
+| GET | `/swagger-ui` | No | Swagger UI (OpenAPI spec browser) |
+| GET | `/api-docs/openapi.json` | No | OpenAPI 3.0 JSON spec |
 
 ## Database Schema
 
@@ -105,7 +106,7 @@ CREATE TABLE like_counts (
 |-------|--------|------------|
 | `idx_likes_user_created (user_id, created_at DESC, id DESC)` | Cursor pagination for user's likes | Low — append-only pattern |
 | `idx_likes_content (content_type, content_id)` | Count fallback queries | Low |
-| `idx_likes_created_at (created_at)` | Time-windowed leaderboard | Low |
+| `idx_likes_created_at (created_at) USING brin (pages_per_range=32)` | Time-windowed leaderboard | Very low — BRIN is ideal for append-only timestamp columns |
 
 ## Redis Key Design
 
@@ -115,13 +116,14 @@ CREATE TABLE like_counts (
 | `cv:{type}:{id}` | STRING | 3600s/60s | Content validation cache |
 | `rl:w:{hash}` | ZSET | 70s | Write rate limit (30/min) |
 | `rl:r:{hash}` | ZSET | 70s | Read rate limit (1000/min) |
+| `lb:{window}` | ZSET | no TTL | Leaderboard per window (score=count, member="{type}:{id}"); content_type filter in app |
 | `sse:{type}:{id}` | PUB/SUB | - | SSE event channel |
 
 ### Cache Consistency
 
 - **Max staleness:** 300s for counts, 3600s for content validation
-- **Invalidation:** INCR/DECR on like/unlike (atomic with DB transaction)
-- **Stampede protection:** SET NX lock with 5s TTL, losers wait 50ms then retry or hit DB
+- **Invalidation:** Conditional INCR/DECR via Lua scripts (only updates if key exists, preventing ghost counts)
+- **Stampede protection:** SET NX lock with 5s TTL on count cache miss; losers wait 50ms then retry cache, then fallback to DB
 - **Redis failure:** Graceful degradation — all reads fallback to DB, never error to client
 
 ## Resilience
@@ -185,15 +187,15 @@ docker compose up -d
 cargo test --test integration_test -p social-api -- --ignored
 ```
 
-**30 unit tests** covering:
-- Cursor encode/decode roundtrip
-- Error code -> HTTP status mapping
-- Circuit breaker state transitions (7 tests)
-- Path normalization for metrics
-- TimeWindow parsing, duration, display
-- API error serialization
+**33 unit tests** covering:
+- Circuit breaker state transitions (10 tests: consecutive failures, failure rate window, half-open recovery)
+- TimeWindow parsing, duration, display, and type serialization (7 tests)
+- Error code -> HTTP status mapping and API error serialization (7 tests)
+- Cursor encode/decode roundtrip and invalid input handling (4 tests)
+- Path normalization for metrics (3 tests)
+- Config env-var parsing (2 tests)
 
-**20 integration tests** covering:
+**21 integration tests** covering:
 - Full like lifecycle
 - Idempotency (like + unlike)
 - Authentication and authorization
@@ -213,6 +215,8 @@ cargo test --test integration_test -p social-api -- --ignored
 3. **Separate like_counts table vs COUNT(*)**: Extra write per like/unlike, but batch count reads become O(1) PK lookups. Critical for the 80/20 read/write ratio.
 
 4. **Single mock binary vs per-service**: Simpler Docker setup. In production, each content API would be a separate service.
+
+5. **User status caching deferred**: `CACHE_TTL_USER_STATUS_SECS` config exists for forward-compatibility but user like status is read directly from DB (fast PK lookup on the unique constraint — already index-backed).
 
 ## License
 
