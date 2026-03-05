@@ -1,0 +1,43 @@
+# Stage 1: Build
+FROM rust:latest AS builder
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock* ./
+COPY crates/social-api/Cargo.toml crates/social-api/Cargo.toml
+COPY crates/shared/Cargo.toml crates/shared/Cargo.toml
+COPY crates/mock-services/Cargo.toml crates/mock-services/Cargo.toml
+
+RUN mkdir -p crates/social-api/src crates/shared/src crates/mock-services/src && \
+    echo "fn main() {}" > crates/social-api/src/main.rs && \
+    echo "" > crates/shared/src/lib.rs && \
+    echo "fn main() {}" > crates/mock-services/src/main.rs
+
+RUN cargo build --release --bin mock-services 2>/dev/null || true
+
+COPY crates/ crates/
+COPY migrations/ migrations/
+
+RUN touch crates/mock-services/src/main.rs crates/shared/src/lib.rs
+
+RUN cargo build --release --bin mock-services
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -s /bin/false -u 1001 appuser
+
+COPY --from=builder /app/target/release/mock-services /usr/local/bin/mock-services
+
+USER appuser
+
+EXPOSE 8081
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8081/health || exit 1
+
+CMD ["mock-services"]
