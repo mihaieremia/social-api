@@ -568,6 +568,369 @@ impl LikeService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use testcontainers::runners::AsyncRunner;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Test doubles
+    // -------------------------------------------------------------------------
+
+    struct AlwaysValidContent;
+
+    #[async_trait::async_trait]
+    impl ContentValidator for AlwaysValidContent {
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
+            Ok(true)
+        }
+    }
+
+    struct AlwaysInvalidContent;
+
+    #[async_trait::async_trait]
+    impl ContentValidator for AlwaysInvalidContent {
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
+            Ok(false)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Setup helper
+    // -------------------------------------------------------------------------
+
+    /// Start postgres + redis testcontainers and return a LikeService + the
+    /// containers (which must be kept alive for the duration of the test).
+    async fn make_service(
+        validator: Arc<dyn ContentValidator>,
+    ) -> (
+        LikeService,
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+    ) {
+        // Postgres
+        let pg = testcontainers_modules::postgres::Postgres::default()
+            .start()
+            .await
+            .expect("postgres container");
+        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres"
+        );
+
+        // Redis
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+        // Config
+        let mut config = crate::config::Config::new_for_test();
+        config.database_url = db_url.clone();
+        config.read_database_url = db_url.clone();
+        config.redis_url = redis_url;
+
+        // DB pools
+        let db = crate::db::DbPools::from_config(&config)
+            .await
+            .expect("db pools");
+
+        // Run migrations
+        sqlx::migrate!("../../migrations")
+            .run(&db.writer)
+            .await
+            .expect("migrations");
+
+        // Redis pool + cache
+        let redis_pool = crate::cache::manager::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = crate::cache::manager::CacheManager::new(redis_pool);
+
+        // Circuit breaker (permissive for tests)
+        let cb_config = crate::clients::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 100,
+            recovery_timeout: std::time::Duration::from_secs(1),
+            success_threshold: 1,
+            service_name: "content_api_test".to_string(),
+            rate_window: std::time::Duration::from_secs(30),
+            failure_rate_threshold: 1.0,
+            min_calls_for_rate: 1000,
+        };
+        let content_breaker = Arc::new(crate::clients::circuit_breaker::CircuitBreaker::new(cb_config));
+
+        let svc = LikeService::new_with_validator(db, cache, validator, config, content_breaker);
+        (svc, pg, redis)
+    }
+
+    // -------------------------------------------------------------------------
+    // 1. like new content increments count
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_like_new_content_increments_count() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let resp = svc.like(user_id, "post", content_id).await.unwrap();
+        assert!(resp.liked);
+        assert_eq!(resp.count, 1);
+
+        let count_resp = svc.get_count("post", content_id).await.unwrap();
+        assert_eq!(count_resp.count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. like duplicate is idempotent
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_like_duplicate_is_idempotent() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", content_id).await.unwrap();
+        let resp = svc.like(user_id, "post", content_id).await.unwrap();
+
+        assert!(resp.liked);
+        assert_eq!(resp.already_existed, Some(true));
+
+        let count_resp = svc.get_count("post", content_id).await.unwrap();
+        assert_eq!(count_resp.count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. like invalid content rolls back
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_like_invalid_content_rolls_back() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysInvalidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let err = svc.like(user_id, "post", content_id).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::ContentNotFound { .. }),
+            "expected ContentNotFound, got: {err:?}"
+        );
+
+        // Count must stay at 0 (row rolled back)
+        let count_resp = svc.get_count("post", content_id).await.unwrap();
+        assert_eq!(count_resp.count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. unlike decrements count
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_unlike_decrements_count() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", content_id).await.unwrap();
+
+        let resp = svc.unlike(user_id, "post", content_id).await.unwrap();
+        assert!(!resp.liked);
+        assert_eq!(resp.was_liked, Some(true));
+
+        let count_resp = svc.get_count("post", content_id).await.unwrap();
+        assert_eq!(count_resp.count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. unlike not liked is idempotent
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_unlike_not_liked_is_idempotent() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let resp = svc.unlike(user_id, "post", content_id).await.unwrap();
+        assert!(!resp.liked);
+        assert_eq!(resp.was_liked, Some(false));
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. get_count cache hit returns same value
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_count_cache_hit() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", content_id).await.unwrap();
+
+        let first = svc.get_count("post", content_id).await.unwrap();
+        let second = svc.get_count("post", content_id).await.unwrap();
+
+        assert_eq!(first.count, second.count);
+        assert_eq!(first.count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. batch_counts returns correct values
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_batch_counts_returns_correct_values() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id_a = Uuid::new_v4();
+        let content_id_b = Uuid::new_v4();
+
+        // Like only content A
+        svc.like(user_id, "post", content_id_a).await.unwrap();
+
+        let items = vec![
+            ("post".to_string(), content_id_a),
+            ("post".to_string(), content_id_b),
+        ];
+        let results = svc.batch_counts(&items).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        let a = results.iter().find(|r| r.content_id == content_id_a).unwrap();
+        let b = results.iter().find(|r| r.content_id == content_id_b).unwrap();
+        assert_eq!(a.count, 1);
+        assert_eq!(b.count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. batch_counts too large returns error
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_batch_counts_too_large_returns_error() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+
+        let items: Vec<(String, Uuid)> = (0..101)
+            .map(|_| ("post".to_string(), Uuid::new_v4()))
+            .collect();
+
+        let err = svc.batch_counts(&items).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::BatchTooLarge { size: 101, max: 100 }),
+            "expected BatchTooLarge, got: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 9. get_leaderboard returns ok
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_leaderboard_returns_ok() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+
+        let resp = svc
+            .get_leaderboard(None, TimeWindow::All, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.window, "all");
+        // No data yet — items may be empty, but must not panic.
+        assert!(resp.items.len() <= 10);
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. get_user_likes pagination
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_user_likes_pagination() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+
+        // Like 3 distinct content items
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        for &cid in &ids {
+            svc.like(user_id, "post", cid).await.unwrap();
+        }
+
+        // Fetch first page (limit=2)
+        let page1 = svc.get_user_likes(user_id, None, None, 2).await.unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+        assert!(page1.next_cursor.is_some());
+
+        // Fetch second page using cursor
+        let cursor = page1.next_cursor.as_deref();
+        let page2 = svc.get_user_likes(user_id, None, cursor, 2).await.unwrap();
+        assert_eq!(page2.items.len(), 1);
+        assert!(!page2.has_more);
+    }
+
+    // -------------------------------------------------------------------------
+    // 11. batch_statuses returns correct status
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_batch_statuses_returns_correct_status() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let liked_id = Uuid::new_v4();
+        let not_liked_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", liked_id).await.unwrap();
+
+        let items = vec![
+            ("post".to_string(), liked_id),
+            ("post".to_string(), not_liked_id),
+        ];
+        let results = svc.batch_statuses(user_id, &items).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        let liked = results.iter().find(|r| r.content_id == liked_id).unwrap();
+        let not_liked = results.iter().find(|r| r.content_id == not_liked_id).unwrap();
+        assert!(liked.liked);
+        assert!(liked.liked_at.is_some());
+        assert!(!not_liked.liked);
+        assert!(not_liked.liked_at.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // 12. stampede coalescing — 5 concurrent get_count calls on cold cache
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stampede_coalescing() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = Arc::new(svc);
+        let content_id = Uuid::new_v4();
+
+        // No likes — cold cache — all concurrent calls should return 0
+        let handles: Vec<_> = (0..5)
+            .map(|_| {
+                let svc = Arc::clone(&svc);
+                tokio::spawn(async move {
+                    svc.get_count("post", content_id).await
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for h in handles {
+            results.push(h.await.expect("task did not panic"));
+        }
+
+        for r in results {
+            assert_eq!(r.unwrap().count, 0);
+        }
+    }
+}
+
 /// Parse a sorted-set member string `"content_type:content_id"` back into a
 /// `TopLikedItem`. Returns `None` (and logs a warning) when the format is
 /// unexpected so a single corrupt entry does not break the response.
