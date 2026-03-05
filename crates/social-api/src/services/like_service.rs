@@ -53,7 +53,7 @@ impl LikeService {
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // Update cache
+        // Update cache and publish SSE event
         if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
             self.cache.incr(&cache_key).await;
@@ -61,6 +61,18 @@ impl LikeService {
 
         // Get current count
         let count = self.get_count_inner(content_type, content_id).await?;
+
+        // Publish SSE event
+        if !already_existed {
+            let event = serde_json::json!({
+                "event": "like",
+                "user_id": user_id,
+                "count": count,
+                "timestamp": like_row.created_at.to_rfc3339(),
+            });
+            let channel = format!("sse:{content_type}:{content_id}");
+            self.cache.publish(&channel, &event.to_string()).await;
+        }
 
         Ok(LikeActionResponse {
             liked: true,
@@ -92,6 +104,18 @@ impl LikeService {
         }
 
         let count = self.get_count_inner(content_type, content_id).await?;
+
+        // Publish SSE event
+        if was_liked {
+            let event = serde_json::json!({
+                "event": "unlike",
+                "user_id": user_id,
+                "count": count,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            let channel = format!("sse:{content_type}:{content_id}");
+            self.cache.publish(&channel, &event.to_string()).await;
+        }
 
         Ok(LikeActionResponse {
             liked: false,

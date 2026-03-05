@@ -37,7 +37,9 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::likes::batch_statuses),
         )
         // Leaderboard
-        .route("/v1/likes/top", get(handlers::likes::get_leaderboard));
+        .route("/v1/likes/top", get(handlers::likes::get_leaderboard))
+        // SSE stream
+        .route("/v1/likes/stream", get(handlers::stream::like_stream));
 
     Router::new()
         .merge(health_routes)
