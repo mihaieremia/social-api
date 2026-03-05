@@ -139,8 +139,7 @@ impl Config {
         self.content_api_urls.get(content_type).map(|s| s.as_str())
     }
 
-    /// Minimal config for unit tests — does NOT read environment variables.
-    #[cfg(test)]
+    /// Minimal config for unit/integration tests — does NOT read environment variables.
     pub fn new_for_test() -> Self {
         let mut content_api_urls = std::collections::HashMap::new();
         content_api_urls.insert("post".to_string(), "http://localhost:8081".to_string());

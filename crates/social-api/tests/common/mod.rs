@@ -8,11 +8,12 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::http::Request;
 use http_body_util::BodyExt as _;
-use hyper::Request;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use uuid::Uuid;
