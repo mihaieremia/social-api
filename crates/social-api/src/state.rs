@@ -48,6 +48,9 @@ impl AppState {
             recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
             success_threshold: config.circuit_breaker_success_threshold,
             service_name: "profile_api".to_string(),
+            rate_window: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
         }));
 
         let content_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
@@ -55,6 +58,9 @@ impl AppState {
             recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
             success_threshold: config.circuit_breaker_success_threshold,
             service_name: "content_api".to_string(),
+            rate_window: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
         }));
 
         let token_validator =

@@ -29,21 +29,55 @@ impl TokenValidator for HttpTokenValidator {
     async fn validate(&self, token: &str) -> Result<AuthenticatedUser, AppError> {
         let url = format!("{}/v1/auth/validate", self.profile_api_url);
 
+        let start = std::time::Instant::now();
         let response = self
             .http_client
             .get(&url)
             .header("Authorization", format!("Bearer {token}"))
             .timeout(std::time::Duration::from_secs(5))
             .send()
-            .await
-            .map_err(|e| {
+            .await;
+        let latency = start.elapsed().as_secs_f64();
+
+        let response = match response {
+            Ok(r) => {
+                metrics::counter!(
+                    "social_api_external_calls_total",
+                    "service" => "profile_api",
+                    "method" => "validate",
+                    "status" => r.status().as_u16().to_string(),
+                )
+                .increment(1);
+                metrics::histogram!(
+                    "social_api_external_call_duration_seconds",
+                    "service" => "profile_api",
+                    "method" => "validate",
+                )
+                .record(latency);
+                r
+            }
+            Err(e) => {
+                metrics::counter!(
+                    "social_api_external_calls_total",
+                    "service" => "profile_api",
+                    "method" => "validate",
+                    "status" => "error",
+                )
+                .increment(1);
+                metrics::histogram!(
+                    "social_api_external_call_duration_seconds",
+                    "service" => "profile_api",
+                    "method" => "validate",
+                )
+                .record(latency);
                 tracing::error!(
                     service = "profile_api",
                     error = %e,
                     "Profile API request failed"
                 );
-                AppError::DependencyUnavailable("profile_api".to_string())
-            })?;
+                return Err(AppError::DependencyUnavailable("profile_api".to_string()));
+            }
+        };
 
         if !response.status().is_success() {
             return Err(AppError::Unauthorized(

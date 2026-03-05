@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -32,14 +33,28 @@ pub struct CircuitBreakerConfig {
     pub recovery_timeout: Duration,
     /// Number of consecutive successes in HalfOpen to close the breaker
     pub success_threshold: u32,
-    /// Service name for logging
+    /// Service name for logging and metrics
     pub service_name: String,
+    /// Sliding window duration for failure rate calculation
+    pub rate_window: Duration,
+    /// Failure rate threshold (0.0-1.0) to trip the breaker
+    pub failure_rate_threshold: f64,
+    /// Minimum calls in the window before rate-based tripping applies
+    pub min_calls_for_rate: u32,
+}
+
+/// A single call outcome in the sliding window.
+#[derive(Debug, Clone, Copy)]
+struct CallRecord {
+    timestamp: Instant,
+    success: bool,
 }
 
 /// Thread-safe circuit breaker state machine.
 ///
 /// State transitions:
 /// - Closed -> Open: after `failure_threshold` consecutive failures
+///   **or** >50% failure rate in a 30-second window (configurable)
 /// - Open -> HalfOpen: after `recovery_timeout` elapses
 /// - HalfOpen -> Closed: after `success_threshold` consecutive successes
 /// - HalfOpen -> Open: on any failure
@@ -49,6 +64,8 @@ pub struct CircuitBreaker {
     consecutive_failures: AtomicU32,
     consecutive_successes: AtomicU32,
     last_failure_time: RwLock<Option<Instant>>,
+    /// Sliding window of recent call outcomes for failure rate calculation.
+    call_window: RwLock<VecDeque<CallRecord>>,
 }
 
 impl CircuitBreaker {
@@ -59,6 +76,7 @@ impl CircuitBreaker {
             consecutive_failures: AtomicU32::new(0),
             consecutive_successes: AtomicU32::new(0),
             last_failure_time: RwLock::new(None),
+            call_window: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -92,6 +110,7 @@ impl CircuitBreaker {
     /// Record a successful request.
     pub fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.push_call(true);
 
         let state = *self.state.read().unwrap();
         if state == CircuitState::HalfOpen {
@@ -106,12 +125,19 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         self.consecutive_successes.store(0, Ordering::SeqCst);
         *self.last_failure_time.write().unwrap() = Some(Instant::now());
+        self.push_call(false);
 
         let state = *self.state.read().unwrap();
         match state {
             CircuitState::Closed => {
                 let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                // Trip on consecutive failures
                 if failures >= self.config.failure_threshold {
+                    self.transition_to(CircuitState::Open);
+                    return;
+                }
+                // Trip on failure rate in sliding window
+                if self.failure_rate_exceeded() {
                     self.transition_to(CircuitState::Open);
                 }
             }
@@ -126,10 +152,46 @@ impl CircuitBreaker {
         }
     }
 
-    /// Get current state (used in tests).
+    /// Get current state.
     #[cfg(test)]
     pub fn state(&self) -> CircuitState {
         *self.state.read().unwrap()
+    }
+
+    /// Push a call outcome into the sliding window, pruning expired entries.
+    fn push_call(&self, success: bool) {
+        let now = Instant::now();
+        let mut window = self.call_window.write().unwrap();
+
+        // Prune entries older than the rate window
+        let cutoff = now - self.config.rate_window;
+        while let Some(front) = window.front() {
+            if front.timestamp < cutoff {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        window.push_back(CallRecord {
+            timestamp: now,
+            success,
+        });
+    }
+
+    /// Check if the failure rate in the sliding window exceeds the threshold.
+    fn failure_rate_exceeded(&self) -> bool {
+        let window = self.call_window.read().unwrap();
+        let total = window.len() as u32;
+
+        // Don't trip on rate if we haven't seen enough calls
+        if total < self.config.min_calls_for_rate {
+            return false;
+        }
+
+        let failures = window.iter().filter(|r| !r.success).count() as f64;
+        let rate = failures / total as f64;
+        rate > self.config.failure_rate_threshold
     }
 
     fn transition_to(&self, new_state: CircuitState) {
@@ -160,6 +222,8 @@ impl CircuitBreaker {
                 CircuitState::Closed => {
                     self.consecutive_failures.store(0, Ordering::SeqCst);
                     self.consecutive_successes.store(0, Ordering::SeqCst);
+                    // Clear the window on close so stale failures don't re-trip
+                    self.call_window.write().unwrap().clear();
                 }
                 CircuitState::HalfOpen => {
                     self.consecutive_successes.store(0, Ordering::SeqCst);
@@ -182,6 +246,9 @@ mod tests {
             recovery_timeout: Duration::from_millis(100),
             success_threshold: 2,
             service_name: "test".to_string(),
+            rate_window: Duration::from_secs(30),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
         }
     }
 
@@ -274,5 +341,72 @@ mod tests {
         cb.record_failure();
         // Should still be closed (only 2 consecutive failures)
         assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_failure_rate_trips_breaker() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 100, // high so consecutive doesn't trip
+            min_calls_for_rate: 10,
+            failure_rate_threshold: 0.5,
+            ..test_config()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // 4 successes + 6 failures = 60% failure rate (>50%)
+        for _ in 0..4 {
+            cb.record_success();
+        }
+        for _ in 0..5 {
+            cb.record_failure();
+            assert_eq!(cb.state(), CircuitState::Closed); // not enough calls yet
+        }
+        // 10th call (failure) — now 6/10 = 60% > 50%
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_failure_rate_needs_minimum_calls() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 100, // high so consecutive doesn't trip
+            min_calls_for_rate: 10,
+            failure_rate_threshold: 0.5,
+            ..test_config()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // 5 failures, but only 5 calls — below min_calls_for_rate
+        for _ in 0..5 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_window_cleared_on_close() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            recovery_timeout: Duration::from_millis(10),
+            min_calls_for_rate: 10,
+            ..test_config()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Trip via consecutive, then recover
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        std::thread::sleep(Duration::from_millis(20));
+        cb.allow_request(); // HalfOpen
+        cb.record_success();
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        // Window should be cleared — old failures shouldn't cause rate trip
+        let window = cb.call_window.read().unwrap();
+        assert!(window.is_empty());
     }
 }

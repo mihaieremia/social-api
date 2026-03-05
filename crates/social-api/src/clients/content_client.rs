@@ -48,23 +48,57 @@ impl ContentValidator for HttpContentValidator {
             return Ok(cached == "1");
         }
 
-        // Call Content API
+        // Call Content API with metrics instrumentation
         let url = format!("{base_url}/v1/{content_type}/{content_id}");
+        let start = std::time::Instant::now();
         let response = self
             .http_client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5))
             .send()
-            .await
-            .map_err(|e| {
+            .await;
+        let latency = start.elapsed().as_secs_f64();
+
+        let response = match response {
+            Ok(r) => {
+                metrics::counter!(
+                    "social_api_external_calls_total",
+                    "service" => "content_api",
+                    "method" => "validate",
+                    "status" => r.status().as_u16().to_string(),
+                )
+                .increment(1);
+                metrics::histogram!(
+                    "social_api_external_call_duration_seconds",
+                    "service" => "content_api",
+                    "method" => "validate",
+                )
+                .record(latency);
+                r
+            }
+            Err(e) => {
+                metrics::counter!(
+                    "social_api_external_calls_total",
+                    "service" => "content_api",
+                    "method" => "validate",
+                    "status" => "error",
+                )
+                .increment(1);
+                metrics::histogram!(
+                    "social_api_external_call_duration_seconds",
+                    "service" => "content_api",
+                    "method" => "validate",
+                )
+                .record(latency);
                 tracing::error!(
                     service = "content_api",
                     content_type = content_type,
                     error = %e,
                     "Content API request failed"
                 );
-                AppError::DependencyUnavailable("content_api".to_string())
-            })?;
+                return Err(AppError::DependencyUnavailable("content_api".to_string()));
+            }
+        };
 
         let valid = response.status().is_success();
 
