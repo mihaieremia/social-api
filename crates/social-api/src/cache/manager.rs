@@ -67,6 +67,7 @@ impl CacheManager {
     }
 
     /// Delete a key. Silently fails on Redis error.
+    #[allow(dead_code)]
     pub async fn del(&self, key: &str) {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
@@ -272,6 +273,7 @@ impl CacheManager {
     }
 
     /// Get the underlying pool for Pub/Sub subscriber connections.
+    #[allow(dead_code)]
     pub fn pool(&self) -> &RedisPool {
         &self.pool
     }

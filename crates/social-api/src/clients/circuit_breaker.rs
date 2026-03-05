@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// Circuit breaker states.
@@ -126,7 +126,8 @@ impl CircuitBreaker {
         }
     }
 
-    /// Get current state.
+    /// Get current state (used in tests).
+    #[cfg(test)]
     pub fn state(&self) -> CircuitState {
         *self.state.read().unwrap()
     }

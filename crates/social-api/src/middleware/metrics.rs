@@ -1,8 +1,4 @@
-use axum::{
-    extract::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, middleware::Next, response::Response};
 use std::time::Instant;
 
 /// Middleware that records HTTP request metrics.
@@ -43,9 +39,7 @@ fn normalize_path(path: &str) -> String {
     let normalized: Vec<String> = parts
         .iter()
         .map(|part| {
-            if uuid::Uuid::parse_str(part).is_ok() {
-                ":id".to_string()
-            } else if part.parse::<i64>().is_ok() {
+            if uuid::Uuid::parse_str(part).is_ok() || part.parse::<i64>().is_ok() {
                 ":id".to_string()
             } else {
                 part.to_string()
@@ -63,10 +57,7 @@ pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
         .expect("Failed to install Prometheus recorder");
 
     // Register all spec-required metrics with initial values
-    metrics::describe_counter!(
-        "social_api_http_requests_total",
-        "Total HTTP requests"
-    );
+    metrics::describe_counter!("social_api_http_requests_total", "Total HTTP requests");
     metrics::describe_histogram!(
         "social_api_http_request_duration_seconds",
         "HTTP request duration in seconds"
@@ -91,10 +82,7 @@ pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
         "social_api_sse_connections_active",
         "Active SSE connections"
     );
-    metrics::describe_counter!(
-        "social_api_likes_total",
-        "Total like/unlike operations"
-    );
+    metrics::describe_counter!("social_api_likes_total", "Total like/unlike operations");
 
     handle
 }

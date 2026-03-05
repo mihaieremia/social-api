@@ -33,7 +33,5 @@ async fn main() {
     tracing::info!("Mock services listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    axum::serve(listener, app).await.expect("Server failed");
 }

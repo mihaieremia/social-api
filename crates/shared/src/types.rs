@@ -272,10 +272,7 @@ mod tests {
             content_type: "post".to_string(),
             content_id: Uuid::parse_str("731b0395-4888-4822-b516-05b4b7bf2089").unwrap(),
         };
-        assert_eq!(
-            format!("{cr}"),
-            "post:731b0395-4888-4822-b516-05b4b7bf2089"
-        );
+        assert_eq!(format!("{cr}"), "post:731b0395-4888-4822-b516-05b4b7bf2089");
     }
 
     #[test]

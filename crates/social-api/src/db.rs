@@ -55,18 +55,13 @@ impl DbPools {
     /// Run embedded migrations against the writer pool.
     pub async fn run_migrations(&self) -> Result<(), sqlx::migrate::MigrateError> {
         tracing::info!("Running database migrations...");
-        sqlx::migrate!("../../migrations")
-            .run(&self.writer)
-            .await?;
+        sqlx::migrate!("../../migrations").run(&self.writer).await?;
         tracing::info!("Database migrations complete");
         Ok(())
     }
 
     /// Check if the database is reachable (for health checks).
     pub async fn is_healthy(&self) -> bool {
-        sqlx::query("SELECT 1")
-            .execute(&self.writer)
-            .await
-            .is_ok()
+        sqlx::query("SELECT 1").execute(&self.writer).await.is_ok()
     }
 }

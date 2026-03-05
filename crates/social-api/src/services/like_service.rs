@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use shared::errors::AppError;
 use shared::types::*;
-use tracing;
 use uuid::Uuid;
 
 use crate::cache::manager::CacheManager;
+use crate::clients::circuit_breaker::CircuitBreaker;
 use crate::clients::content_client::{ContentValidator, HttpContentValidator};
 use crate::config::Config;
 use crate::db::DbPools;
@@ -16,6 +18,7 @@ pub struct LikeService {
     cache: CacheManager,
     content_validator: HttpContentValidator,
     config: Config,
+    content_breaker: Arc<CircuitBreaker>,
 }
 
 impl LikeService {
@@ -24,6 +27,7 @@ impl LikeService {
         cache: CacheManager,
         http_client: reqwest::Client,
         config: Config,
+        content_breaker: Arc<CircuitBreaker>,
     ) -> Self {
         let content_validator =
             HttpContentValidator::new(http_client, cache.clone(), config.clone());
@@ -32,6 +36,7 @@ impl LikeService {
             cache,
             content_validator,
             config,
+            content_breaker,
         }
     }
 
@@ -409,9 +414,7 @@ impl LikeService {
             if !cached.is_empty() {
                 let items: Vec<TopLikedItem> = cached
                     .into_iter()
-                    .filter_map(|(member, score)| {
-                        parse_leaderboard_member(&member, score)
-                    })
+                    .filter_map(|(member, score)| parse_leaderboard_member(&member, score))
                     .collect();
 
                 return Ok(TopLikedResponse {
@@ -455,18 +458,31 @@ impl LikeService {
     }
 
     async fn validate_content(&self, content_type: &str, content_id: Uuid) -> Result<(), AppError> {
-        let valid = self
+        // Check circuit breaker before making external call
+        if !self.content_breaker.allow_request() {
+            return Err(AppError::DependencyUnavailable("content_api".to_string()));
+        }
+
+        match self
             .content_validator
             .validate(content_type, content_id)
-            .await?;
-
-        if !valid {
-            return Err(AppError::ContentNotFound {
-                content_type: content_type.to_string(),
-                content_id: content_id.to_string(),
-            });
+            .await
+        {
+            Ok(valid) => {
+                self.content_breaker.record_success();
+                if !valid {
+                    return Err(AppError::ContentNotFound {
+                        content_type: content_type.to_string(),
+                        content_id: content_id.to_string(),
+                    });
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.content_breaker.record_failure();
+                Err(e)
+            }
         }
-        Ok(())
     }
 }
 

@@ -1,6 +1,5 @@
 use axum::{
-    Router,
-    middleware as axum_middleware,
+    Router, middleware as axum_middleware,
     routing::{delete, get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -21,14 +20,24 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .route("/metrics", get(handlers::metrics_handler::metrics))
         .with_state(metrics_handle);
 
-    let api_routes = Router::new()
-        // Like/Unlike
+    // Write routes (POST/DELETE) — per-user write rate limit
+    let write_routes = Router::new()
         .route("/v1/likes", post(handlers::likes::like_content))
         .route(
             "/v1/likes/{content_type}/{content_id}",
             delete(handlers::likes::unlike_content),
         )
-        // Count & Status
+        .route(
+            "/v1/likes/batch/statuses",
+            post(handlers::likes::batch_statuses),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit::write_rate_limit,
+        ));
+
+    // Read routes (GET) — per-IP read rate limit
+    let read_routes = Router::new()
         .route(
             "/v1/likes/{content_type}/{content_id}/count",
             get(handlers::likes::get_count),
@@ -37,22 +46,31 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
             "/v1/likes/{content_type}/{content_id}/status",
             get(handlers::likes::get_status),
         )
-        // User likes
         .route("/v1/likes/user", get(handlers::likes::get_user_likes))
-        // Batch
-        .route("/v1/likes/batch/counts", post(handlers::likes::batch_counts))
         .route(
-            "/v1/likes/batch/statuses",
-            post(handlers::likes::batch_statuses),
+            "/v1/likes/batch/counts",
+            post(handlers::likes::batch_counts),
         )
-        // Leaderboard
         .route("/v1/likes/top", get(handlers::likes::get_leaderboard))
-        // SSE stream
         .route("/v1/likes/stream", get(handlers::stream::like_stream))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit::read_rate_limit,
+        ));
+
+    // Merge write + read routes with shared state and global middleware
+    let api_routes = Router::new()
+        .merge(write_routes)
+        .merge(read_routes)
         .with_state(state)
-        // Middleware (applied to API routes)
+        // Global middleware (outermost-first): request_id → error_context → metrics → rate_limit → handler
         .layer(axum_middleware::from_fn(middleware::metrics::track_metrics))
-        .layer(axum_middleware::from_fn(middleware::request_id::inject_request_id));
+        .layer(axum_middleware::from_fn(
+            middleware::error_context::patch_error_request_id,
+        ))
+        .layer(axum_middleware::from_fn(
+            middleware::request_id::inject_request_id,
+        ));
 
     Router::new()
         .merge(health_routes)

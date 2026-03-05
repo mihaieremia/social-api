@@ -70,9 +70,8 @@ impl TokenValidator for HttpTokenValidator {
             .ok_or_else(|| AppError::Internal("Missing user_id in profile response".to_string()))?;
 
         let uuid_str = user_id_str.strip_prefix("usr_").unwrap_or(user_id_str);
-        let user_id = Uuid::parse_str(uuid_str).map_err(|_| {
-            AppError::Internal(format!("Invalid user_id format: {user_id_str}"))
-        })?;
+        let user_id = Uuid::parse_str(uuid_str)
+            .map_err(|_| AppError::Internal(format!("Invalid user_id format: {user_id_str}")))?;
 
         let display_name = body
             .get("display_name")

@@ -1,6 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::cache::manager::CacheManager;
+use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use crate::clients::profile_client::HttpTokenValidator;
 use crate::config::Config;
 use crate::db::DbPools;
 use crate::services::like_service::LikeService;
@@ -18,21 +21,42 @@ struct AppStateInner {
     config: Config,
     http_client: reqwest::Client,
     like_service: LikeService,
+    token_validator: HttpTokenValidator,
+    profile_breaker: Arc<CircuitBreaker>,
+    content_breaker: Arc<CircuitBreaker>,
 }
 
 impl AppState {
     pub fn new(db: DbPools, cache: CacheManager, config: Config) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(20)
             .build()
             .expect("Failed to build HTTP client");
+
+        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: config.circuit_breaker_failure_threshold,
+            recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            success_threshold: config.circuit_breaker_success_threshold,
+            service_name: "profile_api".to_string(),
+        }));
+
+        let content_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: config.circuit_breaker_failure_threshold,
+            recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            success_threshold: config.circuit_breaker_success_threshold,
+            service_name: "content_api".to_string(),
+        }));
+
+        let token_validator =
+            HttpTokenValidator::new(http_client.clone(), config.profile_api_url.clone());
 
         let like_service = LikeService::new(
             db.clone(),
             cache.clone(),
             http_client.clone(),
             config.clone(),
+            content_breaker.clone(),
         );
 
         Self {
@@ -42,6 +66,9 @@ impl AppState {
                 config,
                 http_client,
                 like_service,
+                token_validator,
+                profile_breaker,
+                content_breaker,
             }),
         }
     }
@@ -64,5 +91,18 @@ impl AppState {
 
     pub fn like_service(&self) -> &LikeService {
         &self.inner.like_service
+    }
+
+    pub fn token_validator(&self) -> &HttpTokenValidator {
+        &self.inner.token_validator
+    }
+
+    pub fn profile_breaker(&self) -> &CircuitBreaker {
+        &self.inner.profile_breaker
+    }
+
+    #[allow(dead_code)]
+    pub fn content_breaker(&self) -> &CircuitBreaker {
+        &self.inner.content_breaker
     }
 }

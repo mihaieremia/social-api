@@ -1,5 +1,5 @@
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
@@ -7,10 +7,11 @@ use axum::{
 use shared::errors::{ApiError, ErrorCode};
 
 use crate::cache::manager::CacheManager;
+use crate::state::AppState;
 
 /// Lua script for atomic sliding window rate limiting.
 /// Operations: ZREMRANGEBYSCORE (prune old), ZCARD (count), ZADD (add current).
-/// All in a single EVAL for atomicity across replicas.
+/// All in a single EVAL for atomicity.
 const RATE_LIMIT_SCRIPT: &str = r#"
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -116,10 +117,25 @@ fn add_rate_limit_headers(response: &mut Response, result: &RateLimitResult) {
     }
 }
 
-/// Write rate limit middleware (per-user, 30/min default).
-/// Applied to POST/DELETE endpoints that require authentication.
-pub async fn write_rate_limit(request: Request, next: Next) -> Response {
-    // Extract user_id from auth header to build rate limit key
+/// Build a 429 response with rate limit headers.
+fn rate_limited_response(result: &RateLimitResult) -> Response {
+    let api_error = ApiError::new(ErrorCode::RateLimited, "Rate limit exceeded", "unknown");
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(api_error)).into_response();
+
+    add_rate_limit_headers(&mut response, result);
+    if let Ok(v) = HeaderValue::from_str(&result.reset_secs.to_string()) {
+        response.headers_mut().insert("Retry-After", v);
+    }
+    response
+}
+
+/// Write rate limit middleware (per-user, applied to POST/DELETE).
+/// Uses `from_fn_with_state` to access AppState.
+pub async fn write_rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     let user_token = request
         .headers()
         .get("authorization")
@@ -127,97 +143,50 @@ pub async fn write_rate_limit(request: Request, next: Next) -> Response {
         .unwrap_or("")
         .to_string();
 
-    // Get cache and config from extensions
-    let cache = request.extensions().get::<CacheManager>().cloned();
-    let write_limit = request
-        .extensions()
-        .get::<RateLimitConfig>()
-        .map(|c| c.write_per_minute)
-        .unwrap_or(30);
+    let key = format!("rl:w:{}", simple_hash(&user_token));
+    let limit = state.config().rate_limit_write_per_minute;
+    let result = check_rate_limit(state.cache(), &key, limit, 60).await;
 
-    if let Some(cache) = cache {
-        let key = format!("rl:w:{}", simple_hash(&user_token));
-        let result = check_rate_limit(&cache, &key, write_limit, 60).await;
-
-        if !result.allowed {
-            let api_error = ApiError::new(
-                ErrorCode::RateLimited,
-                "Rate limit exceeded",
-                "unknown",
-            );
-            let mut response = (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(api_error),
-            )
-                .into_response();
-
-            add_rate_limit_headers(&mut response, &result);
-            if let Ok(v) = HeaderValue::from_str(&result.reset_secs.to_string()) {
-                response.headers_mut().insert("Retry-After", v);
-            }
-            return response;
-        }
-
-        let mut response = next.run(request).await;
-        add_rate_limit_headers(&mut response, &result);
-        response
-    } else {
-        // No cache available — allow (graceful degradation)
-        next.run(request).await
+    if !result.allowed {
+        return rate_limited_response(&result);
     }
+
+    let mut response = next.run(request).await;
+    add_rate_limit_headers(&mut response, &result);
+    response
 }
 
-/// Read rate limit middleware (per-IP, 1000/min default).
-pub async fn read_rate_limit(request: Request, next: Next) -> Response {
+/// Read rate limit middleware (per-IP, applied to GET).
+/// Uses `from_fn_with_state` to access AppState.
+pub async fn read_rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     let ip = request
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .or_else(|| {
             request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| "unknown") // Simplified for now
+                .headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
         })
         .unwrap_or("unknown")
         .to_string();
 
-    let cache = request.extensions().get::<CacheManager>().cloned();
-    let read_limit = request
-        .extensions()
-        .get::<RateLimitConfig>()
-        .map(|c| c.read_per_minute)
-        .unwrap_or(1000);
+    let key = format!("rl:r:{}", simple_hash(&ip));
+    let limit = state.config().rate_limit_read_per_minute;
+    let result = check_rate_limit(state.cache(), &key, limit, 60).await;
 
-    if let Some(cache) = cache {
-        let key = format!("rl:r:{}", simple_hash(&ip));
-        let result = check_rate_limit(&cache, &key, read_limit, 60).await;
-
-        if !result.allowed {
-            let api_error = ApiError::new(
-                ErrorCode::RateLimited,
-                "Rate limit exceeded",
-                "unknown",
-            );
-            let mut response = (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(api_error),
-            )
-                .into_response();
-
-            add_rate_limit_headers(&mut response, &result);
-            if let Ok(v) = HeaderValue::from_str(&result.reset_secs.to_string()) {
-                response.headers_mut().insert("Retry-After", v);
-            }
-            return response;
-        }
-
-        let mut response = next.run(request).await;
-        add_rate_limit_headers(&mut response, &result);
-        response
-    } else {
-        next.run(request).await
+    if !result.allowed {
+        return rate_limited_response(&result);
     }
+
+    let mut response = next.run(request).await;
+    add_rate_limit_headers(&mut response, &result);
+    response
 }
 
 /// Simple hash for rate limit keys (avoids storing raw tokens/IPs).
@@ -226,11 +195,4 @@ fn simple_hash(input: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.hash(&mut hasher);
     hasher.finish()
-}
-
-/// Rate limit configuration injected via request extensions.
-#[derive(Clone, Debug)]
-pub struct RateLimitConfig {
-    pub write_per_minute: u64,
-    pub read_per_minute: u64,
 }

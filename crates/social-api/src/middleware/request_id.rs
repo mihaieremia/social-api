@@ -1,9 +1,4 @@
-use axum::{
-    extract::Request,
-    http::HeaderValue,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
 use uuid::Uuid;
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -19,7 +14,9 @@ pub async fn inject_request_id(mut request: Request, next: Next) -> Response {
         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4()));
 
     // Insert into request extensions for use by handlers
-    request.extensions_mut().insert(RequestId(request_id.clone()));
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
 
     // Set header on request
     if let Ok(val) = HeaderValue::from_str(&request_id) {

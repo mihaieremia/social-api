@@ -1,12 +1,12 @@
 use axum::{
-    extract::{FromRequestParts, State},
+    extract::FromRequestParts,
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Json},
 };
-use shared::errors::{ApiError, ErrorCode};
+use shared::errors::{ApiError, AppError, ErrorCode};
 use shared::types::AuthenticatedUser;
-use uuid::Uuid;
 
+use crate::clients::profile_client::TokenValidator;
 use crate::state::AppState;
 
 /// Extractor that validates Bearer token and provides AuthenticatedUser.
@@ -38,50 +38,29 @@ where
             return Err(AuthError::MalformedToken);
         }
 
-        // Validate token via Profile API
-        let url = format!("{}/v1/auth/validate", app_state.config().profile_api_url);
-        let response = app_state
-            .http_client()
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|_| AuthError::ServiceUnavailable)?;
-
-        if !response.status().is_success() {
-            return Err(AuthError::InvalidToken);
+        // Check circuit breaker before calling Profile API
+        if !app_state.profile_breaker().allow_request() {
+            return Err(AuthError::ServiceUnavailable);
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|_| AuthError::ServiceUnavailable)?;
-
-        let valid = body.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !valid {
-            return Err(AuthError::InvalidToken);
+        // Delegate to TokenValidator trait implementation
+        match app_state.token_validator().validate(token).await {
+            Ok(user) => {
+                app_state.profile_breaker().record_success();
+                Ok(AuthUser(user))
+            }
+            Err(e) => {
+                // Record failure for dependency errors, not auth errors
+                match &e {
+                    AppError::DependencyUnavailable(_) | AppError::Internal(_) => {
+                        app_state.profile_breaker().record_failure();
+                        Err(AuthError::ServiceUnavailable)
+                    }
+                    AppError::Unauthorized(_) => Err(AuthError::InvalidToken),
+                    _ => Err(AuthError::ServiceUnavailable),
+                }
+            }
         }
-
-        let user_id_str = body
-            .get("user_id")
-            .and_then(|v| v.as_str())
-            .ok_or(AuthError::ServiceUnavailable)?;
-
-        let uuid_str = user_id_str.strip_prefix("usr_").unwrap_or(user_id_str);
-        let user_id =
-            Uuid::parse_str(uuid_str).map_err(|_| AuthError::ServiceUnavailable)?;
-
-        let display_name = body
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown")
-            .to_string();
-
-        Ok(AuthUser(AuthenticatedUser {
-            user_id,
-            display_name,
-        }))
     }
 }
 
@@ -109,13 +88,20 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
         let (code, message) = match self {
             Self::MissingToken => (ErrorCode::Unauthorized, "Missing authorization header"),
-            Self::MalformedToken => (ErrorCode::Unauthorized, "Malformed authorization header. Expected: Bearer <token>"),
+            Self::MalformedToken => (
+                ErrorCode::Unauthorized,
+                "Malformed authorization header. Expected: Bearer <token>",
+            ),
             Self::InvalidToken => (ErrorCode::Unauthorized, "Invalid or expired token"),
-            Self::ServiceUnavailable => (ErrorCode::DependencyUnavailable, "Authentication service unavailable"),
+            Self::ServiceUnavailable => (
+                ErrorCode::DependencyUnavailable,
+                "Authentication service unavailable",
+            ),
         };
 
         let api_error = ApiError::new(code, message, "unknown");
-        let status = StatusCode::from_u16(api_error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(api_error.http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
         (status, Json(api_error)).into_response()
     }

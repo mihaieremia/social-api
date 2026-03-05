@@ -1,12 +1,12 @@
 use axum::{
     extract::{Query, State},
     response::{
-        sse::{Event, Sse},
         IntoResponse,
+        sse::{Event, Sse},
     },
 };
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;

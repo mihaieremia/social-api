@@ -30,6 +30,7 @@ pub struct Config {
     // Cache TTLs
     pub cache_ttl_like_counts_secs: u64,
     pub cache_ttl_content_validation_secs: u64,
+    #[allow(dead_code)]
     pub cache_ttl_user_status_secs: u64,
 
     // Circuit breaker

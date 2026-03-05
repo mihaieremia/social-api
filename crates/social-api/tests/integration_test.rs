@@ -5,7 +5,7 @@
 //! Prerequisites: `docker compose up postgres redis mock-services`
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const BASE_URL: &str = "http://localhost:8080";
 const MOCK_URL: &str = "http://localhost:8081";
@@ -79,9 +79,7 @@ async fn test_like_lifecycle() {
 
     // Check count
     let resp = c
-        .get(format!(
-            "{BASE_URL}/v1/likes/post/{VALID_POST_ID}/count"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID}/count"))
         .send()
         .await
         .unwrap();
@@ -91,9 +89,7 @@ async fn test_like_lifecycle() {
 
     // Check status
     let resp = c
-        .get(format!(
-            "{BASE_URL}/v1/likes/post/{VALID_POST_ID}/status"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID}/status"))
         .header("Authorization", auth_header(TOKEN_USER_1))
         .send()
         .await
@@ -105,9 +101,7 @@ async fn test_like_lifecycle() {
 
     // Unlike
     let resp = c
-        .delete(format!(
-            "{BASE_URL}/v1/likes/post/{VALID_POST_ID}"
-        ))
+        .delete(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID}"))
         .header("Authorization", auth_header(TOKEN_USER_1))
         .send()
         .await
@@ -152,9 +146,7 @@ async fn test_like_idempotency() {
 
     // Cleanup
     let _ = c
-        .delete(format!(
-            "{BASE_URL}/v1/likes/post/{VALID_POST_ID_2}"
-        ))
+        .delete(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID_2}"))
         .header("Authorization", auth_header(TOKEN_USER_2))
         .send()
         .await;
@@ -167,9 +159,7 @@ async fn test_unlike_idempotency() {
 
     // Unlike something never liked
     let resp = c
-        .delete(format!(
-            "{BASE_URL}/v1/likes/post/{VALID_POST_ID_2}"
-        ))
+        .delete(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID_2}"))
         .header("Authorization", auth_header(TOKEN_USER_1))
         .send()
         .await
@@ -239,9 +229,7 @@ async fn test_unknown_content_type() {
 #[ignore]
 async fn test_invalid_content_id() {
     let resp = client()
-        .get(format!(
-            "{BASE_URL}/v1/likes/post/not-a-uuid/count"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/post/not-a-uuid/count"))
         .send()
         .await
         .unwrap();
@@ -338,9 +326,7 @@ async fn test_user_likes_pagination() {
 
     // Get first page with limit=1
     let resp = c
-        .get(format!(
-            "{BASE_URL}/v1/likes/user?limit=1"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/user?limit=1"))
         .header("Authorization", auth_header(TOKEN_USER_1))
         .send()
         .await
@@ -369,9 +355,7 @@ async fn test_user_likes_pagination() {
 #[ignore]
 async fn test_leaderboard() {
     let resp = client()
-        .get(format!(
-            "{BASE_URL}/v1/likes/top?window=all&limit=5"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/top?window=all&limit=5"))
         .send()
         .await
         .unwrap();
@@ -385,9 +369,7 @@ async fn test_leaderboard() {
 #[ignore]
 async fn test_leaderboard_invalid_window() {
     let resp = client()
-        .get(format!(
-            "{BASE_URL}/v1/likes/top?window=1y"
-        ))
+        .get(format!("{BASE_URL}/v1/likes/top?window=1y"))
         .send()
         .await
         .unwrap();
@@ -437,9 +419,7 @@ async fn test_mock_profile_api() {
 #[ignore]
 async fn test_mock_content_api() {
     let resp = client()
-        .get(format!(
-            "{MOCK_URL}/v1/post/{VALID_POST_ID}"
-        ))
+        .get(format!("{MOCK_URL}/v1/post/{VALID_POST_ID}"))
         .send()
         .await
         .unwrap();

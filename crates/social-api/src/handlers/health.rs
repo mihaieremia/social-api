@@ -102,7 +102,7 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Check if at least one content API is reachable via its health endpoint.
 async fn check_any_content_api(state: &AppState) -> bool {
-    for (_content_type, url) in &state.config().content_api_urls {
+    for url in state.config().content_api_urls.values() {
         let health_url = format!("{url}/health");
         match state
             .http_client()

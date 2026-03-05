@@ -56,9 +56,8 @@ async fn main() {
     let app_state = AppState::new(db.clone(), cache.clone(), config.clone());
 
     // Spawn background leaderboard refresh task
-    let _refresh_handle = tasks::leaderboard_refresh::spawn_leaderboard_refresh(
-        db, cache, config.clone(),
-    );
+    let _refresh_handle =
+        tasks::leaderboard_refresh::spawn_leaderboard_refresh(db, cache, config.clone());
 
     // Build router
     let app = server::build_router(app_state, metrics_handle);

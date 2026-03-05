@@ -80,11 +80,7 @@ pub struct ApiErrorBody {
 
 impl ApiError {
     /// Create a new API error.
-    pub fn new(
-        code: ErrorCode,
-        message: impl Into<String>,
-        request_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>, request_id: impl Into<String>) -> Self {
         Self {
             error: ApiErrorBody {
                 code,
@@ -203,11 +199,7 @@ impl AppError {
                 format!("Database error: {msg}"),
                 None,
             ),
-            Self::Cache(_) => (
-                ErrorCode::InternalError,
-                "Cache error".to_string(),
-                None,
-            ),
+            Self::Cache(_) => (ErrorCode::InternalError, "Cache error".to_string(), None),
         };
 
         let mut err = ApiError::new(code, message, request_id);
@@ -266,7 +258,10 @@ mod tests {
 
     #[test]
     fn test_app_error_batch_too_large() {
-        let err = AppError::BatchTooLarge { size: 150, max: 100 };
+        let err = AppError::BatchTooLarge {
+            size: 150,
+            max: 100,
+        };
         assert_eq!(err.error_code(), ErrorCode::BatchTooLarge);
         let api_err = err.to_api_error("req_2");
         assert_eq!(api_err.http_status(), 400);
@@ -274,7 +269,9 @@ mod tests {
 
     #[test]
     fn test_app_error_rate_limited() {
-        let err = AppError::RateLimited { retry_after_secs: 30 };
+        let err = AppError::RateLimited {
+            retry_after_secs: 30,
+        };
         assert_eq!(err.error_code(), ErrorCode::RateLimited);
         assert_eq!(err.to_api_error("req_3").http_status(), 429);
     }
