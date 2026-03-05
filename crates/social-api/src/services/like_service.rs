@@ -365,42 +365,26 @@ impl LikeService {
             });
         }
 
-        // Fetch missing from DB
+        // Fetch missing via get_count_inner, which has watch-channel stampede
+        // coalescing — concurrent misses for the same key share one DB query.
         if !missing_indices.is_empty() {
-            let mut missing_items = Vec::with_capacity(missing_indices.len());
-            for &i in &missing_indices {
-                missing_items.push(items[i].clone());
-            }
-
-            // Build O(1) lookup index: (content_type, content_id) -> results position.
-            let index: std::collections::HashMap<(String, Uuid), usize> = items
+            let fetch_futures: Vec<_> = missing_indices
                 .iter()
-                .enumerate()
-                .map(|(i, (ct, cid))| ((ct.clone(), *cid), i))
+                .map(|&i| {
+                    let (ct, cid) = &items[i];
+                    self.get_count_inner(ct, *cid)
+                })
                 .collect();
 
-            let db_counts = like_repository::batch_get_counts(&self.db.reader, &missing_items)
-                .await
-                .map_err(Self::db_err)?;
+            let fetched_counts = futures::future::join_all(fetch_futures).await;
 
-            // Update results and collect cache entries for pipeline
-            let mut cache_entries = Vec::with_capacity(db_counts.len());
-            for (ct, cid, count) in db_counts {
-                if let Some(&pos) = index.get(&(ct.clone(), cid)) {
-                    results[pos].count = count;
+            for (fetch_result, &i) in fetched_counts.into_iter().zip(missing_indices.iter()) {
+                match fetch_result {
+                    Ok(count) => results[i].count = count,
+                    Err(e) => return Err(e),
                 }
-                cache_entries.push((format!("lc:{ct}:{cid}"), count.to_string()));
             }
-
-            // Populate cache in a single pipeline round-trip
-            if !cache_entries.is_empty() {
-                let ttl = self.config.cache_ttl_like_counts_secs;
-                let mut entries = Vec::with_capacity(cache_entries.len());
-                for (k, v) in &cache_entries {
-                    entries.push((k.as_str(), v.as_str(), ttl));
-                }
-                self.cache.mset_ex(&entries).await;
-            }
+            // get_count_inner already populates individual cache keys — no separate mset_ex needed.
         }
 
         Ok(results)
