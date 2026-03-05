@@ -50,10 +50,6 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
             "/v1/likes/{content_type}/{content_id}",
             delete(handlers::likes::unlike_content),
         )
-        .route(
-            "/v1/likes/batch/statuses",
-            post(handlers::likes::batch_statuses),
-        )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit::write_rate_limit,
@@ -73,6 +69,10 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .route(
             "/v1/likes/batch/counts",
             post(handlers::likes::batch_counts),
+        )
+        .route(
+            "/v1/likes/batch/statuses",
+            post(handlers::likes::batch_statuses),
         )
         .route("/v1/likes/top", get(handlers::likes::get_leaderboard))
         .route("/v1/likes/stream", get(handlers::stream::like_stream))
