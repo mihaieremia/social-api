@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::cache::manager::CacheManager;
 use crate::config::Config;
 use crate::db::DbPools;
+use crate::services::like_service::LikeService;
 
 /// Shared application state, passed to all handlers via Axum's State extractor.
 /// Wrapped in Arc for cheap cloning across handler tasks.
@@ -12,10 +13,11 @@ pub struct AppState {
 }
 
 struct AppStateInner {
-    pub db: DbPools,
-    pub cache: CacheManager,
-    pub config: Config,
-    pub http_client: reqwest::Client,
+    db: DbPools,
+    cache: CacheManager,
+    config: Config,
+    http_client: reqwest::Client,
+    like_service: LikeService,
 }
 
 impl AppState {
@@ -26,12 +28,20 @@ impl AppState {
             .build()
             .expect("Failed to build HTTP client");
 
+        let like_service = LikeService::new(
+            db.clone(),
+            cache.clone(),
+            http_client.clone(),
+            config.clone(),
+        );
+
         Self {
             inner: Arc::new(AppStateInner {
                 db,
                 cache,
                 config,
                 http_client,
+                like_service,
             }),
         }
     }
@@ -50,5 +60,9 @@ impl AppState {
 
     pub fn http_client(&self) -> &reqwest::Client {
         &self.inner.http_client
+    }
+
+    pub fn like_service(&self) -> &LikeService {
+        &self.inner.like_service
     }
 }
