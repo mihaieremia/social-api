@@ -7,7 +7,7 @@
 use reqwest::Client;
 use serde_json::{Value, json};
 
-const BASE_URL: &str = "http://localhost:8080";
+const BASE_URL: &str = "http://localhost:9080";
 const MOCK_URL: &str = "http://localhost:8081";
 const TOKEN_USER_1: &str = "tok_user_1";
 const TOKEN_USER_2: &str = "tok_user_2";
