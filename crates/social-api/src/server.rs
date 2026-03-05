@@ -3,9 +3,12 @@ use axum::{
     routing::{delete, get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers;
 use crate::middleware;
+use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
 /// Build the Axum router with all routes and middleware.
@@ -76,4 +79,5 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .merge(health_routes)
         .merge(metrics_route)
         .merge(api_routes)
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
 }

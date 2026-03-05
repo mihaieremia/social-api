@@ -12,6 +12,14 @@ use crate::state::AppState;
 /// GET /health/live
 /// Returns 200 if process is running. No dependency checks.
 /// Used by Kubernetes liveness probe.
+#[utoipa::path(
+    get,
+    path = "/health/live",
+    responses(
+        (status = 200, description = "Service is alive", body = HealthResponse),
+    ),
+    tag = "Health"
+)]
 pub async fn liveness() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -26,6 +34,15 @@ pub async fn liveness() -> impl IntoResponse {
 /// Returns 200 only if ALL dependencies are reachable.
 /// Returns 503 with details of what's failing.
 /// Used by Kubernetes readiness probe.
+#[utoipa::path(
+    get,
+    path = "/health/ready",
+    responses(
+        (status = 200, description = "All dependencies healthy", body = HealthResponse),
+        (status = 503, description = "One or more dependencies unhealthy", body = HealthResponse),
+    ),
+    tag = "Health"
+)]
 pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
     let mut details = HashMap::new();
     let mut all_healthy = true;

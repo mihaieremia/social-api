@@ -53,3 +53,8 @@ async-trait = "0.1"
 async-stream = "0.3"
 tokio-stream = "0.1"
 futures = "0.3"
+
+# OpenAPI
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+utoipa-swagger-ui = { workspace = true }

@@ -48,5 +48,10 @@ base64 = "0.22"
 thiserror = "2"
 anyhow = "1"
 
+# OpenAPI
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
 # Shared crate
 shared = { path = "crates/shared" }

@@ -1,8 +1,9 @@
 use serde::Serialize;
 use std::fmt;
+use utoipa::ToSchema;
 
 /// Error codes matching the API specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 pub enum ErrorCode {
     #[serde(rename = "UNAUTHORIZED")]
     Unauthorized,
@@ -63,14 +64,15 @@ impl fmt::Display for ErrorCode {
 }
 
 /// Structured API error matching the specification's error envelope.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiError {
     pub error: ApiErrorBody,
 }
 
 /// Inner error body.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiErrorBody {
+    /// Machine-readable error code
     pub code: ErrorCode,
     pub message: String,
     pub request_id: String,

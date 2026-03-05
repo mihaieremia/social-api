@@ -1,17 +1,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Authenticated user identity extracted from token validation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
     pub display_name: String,
 }
 
 /// Reference to a specific content item.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 pub struct ContentRef {
     pub content_type: String,
     pub content_id: Uuid,
@@ -24,7 +25,7 @@ impl fmt::Display for ContentRef {
 }
 
 /// Time window for leaderboard queries.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub enum TimeWindow {
     #[serde(rename = "24h")]
     Day,
@@ -76,7 +77,7 @@ impl fmt::Display for TimeWindow {
 }
 
 /// A like record as stored in the database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Like {
     pub id: i64,
     pub user_id: Uuid,
@@ -86,7 +87,7 @@ pub struct Like {
 }
 
 /// SSE event types for the like stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "event")]
 pub enum LikeEvent {
     #[serde(rename = "like")]
@@ -108,7 +109,7 @@ pub enum LikeEvent {
 }
 
 /// Pagination parameters for cursor-based pagination.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct PaginationParams {
     pub cursor: Option<String>,
     pub limit: Option<i64>,
@@ -123,8 +124,26 @@ pub struct PaginatedResponse<T: Serialize> {
     pub has_more: bool,
 }
 
+/// Concrete paginated response for user likes (OpenAPI schema alias).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PaginatedUserLikes {
+    pub items: Vec<UserLikeItem>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+impl From<PaginatedResponse<UserLikeItem>> for PaginatedUserLikes {
+    fn from(resp: PaginatedResponse<UserLikeItem>) -> Self {
+        Self {
+            items: resp.items,
+            next_cursor: resp.next_cursor,
+            has_more: resp.has_more,
+        }
+    }
+}
+
 /// A user's liked item in list responses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserLikeItem {
     pub content_type: String,
     pub content_id: Uuid,
@@ -132,15 +151,16 @@ pub struct UserLikeItem {
 }
 
 /// Like count response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeCountResponse {
     pub content_type: String,
     pub content_id: Uuid,
+    #[schema(example = 42)]
     pub count: i64,
 }
 
 /// Like status response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeStatusResponse {
     pub liked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,33 +168,36 @@ pub struct LikeStatusResponse {
 }
 
 /// Like action response (after like/unlike).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeActionResponse {
     pub liked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub already_existed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub was_liked: Option<bool>,
+    #[schema(example = 42)]
     pub count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liked_at: Option<DateTime<Utc>>,
 }
 
 /// Batch request item.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct BatchItem {
+    #[schema(example = "post")]
     pub content_type: String,
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: Uuid,
 }
 
 /// Batch request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct BatchRequest {
     pub items: Vec<BatchItem>,
 }
 
 /// Batch count result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BatchCountResult {
     pub content_type: String,
     pub content_id: Uuid,
@@ -182,7 +205,7 @@ pub struct BatchCountResult {
 }
 
 /// Batch status result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct BatchStatusResult {
     pub content_type: String,
     pub content_id: Uuid,
@@ -191,7 +214,7 @@ pub struct BatchStatusResult {
 }
 
 /// Top liked content item.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TopLikedItem {
     pub content_type: String,
     pub content_id: Uuid,
@@ -199,7 +222,7 @@ pub struct TopLikedItem {
 }
 
 /// Top liked response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TopLikedResponse {
     pub window: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,14 +231,16 @@ pub struct TopLikedResponse {
 }
 
 /// Like request body (POST /v1/likes).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct LikeRequest {
+    #[schema(example = "post")]
     pub content_type: String,
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: Uuid,
 }
 
 /// Health check detail.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HealthDetail {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,11 +248,23 @@ pub struct HealthDetail {
 }
 
 /// Health check response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<std::collections::HashMap<String, HealthDetail>>,
+}
+
+/// Batch counts response wrapper.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BatchCountsResponse {
+    pub results: Vec<BatchCountResult>,
+}
+
+/// Batch statuses response wrapper.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BatchStatusesResponse {
+    pub results: Vec<BatchStatusResult>,
 }
 
 #[cfg(test)]

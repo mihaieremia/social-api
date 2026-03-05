@@ -10,17 +10,34 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
+use utoipa::ToSchema;
 
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct StreamParams {
+    /// Content type to subscribe to
+    #[schema(example = "post")]
     pub content_type: String,
+    /// Content ID to subscribe to
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: String,
 }
 
 /// GET /v1/likes/stream?content_type=post&content_id=UUID
 /// SSE endpoint for real-time like/unlike events.
+#[utoipa::path(
+    get,
+    path = "/v1/likes/stream",
+    params(
+        ("content_type" = String, Query, description = "Content type to subscribe to", example = "post"),
+        ("content_id" = String, Query, description = "Content UUID to subscribe to", example = "731b0395-4888-4822-b516-05b4b7bf2089"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream opened. Events: like, unlike, heartbeat, shutdown", content_type = "text/event-stream"),
+    ),
+    tag = "Stream"
+)]
 pub async fn like_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,

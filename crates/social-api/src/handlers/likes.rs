@@ -5,6 +5,7 @@ use axum::{
 };
 use shared::errors::AppError;
 use shared::types::*;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::errors::ApiErrorResponse;
@@ -13,6 +14,21 @@ use crate::extractors::content_path::ContentPath;
 use crate::state::AppState;
 
 /// POST /v1/likes — Like content
+#[utoipa::path(
+    post,
+    path = "/v1/likes",
+    request_body = LikeRequest,
+    responses(
+        (status = 201, description = "Content liked successfully", body = LikeActionResponse),
+        (status = 400, description = "Invalid content type or ID", body = shared::errors::ApiError),
+        (status = 401, description = "Unauthorized", body = shared::errors::ApiError),
+        (status = 404, description = "Content not found", body = shared::errors::ApiError),
+        (status = 429, description = "Rate limit exceeded", body = shared::errors::ApiError),
+        (status = 503, description = "Dependency unavailable", body = shared::errors::ApiError),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Likes"
+)]
 pub async fn like_content(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -26,6 +42,22 @@ pub async fn like_content(
 }
 
 /// DELETE /v1/likes/:content_type/:content_id — Unlike content
+#[utoipa::path(
+    delete,
+    path = "/v1/likes/{content_type}/{content_id}",
+    params(
+        ("content_type" = String, Path, description = "Content type"),
+        ("content_id" = Uuid, Path, description = "Content ID"),
+    ),
+    responses(
+        (status = 200, description = "Content unliked successfully", body = LikeActionResponse),
+        (status = 401, description = "Unauthorized", body = shared::errors::ApiError),
+        (status = 404, description = "Content not found", body = shared::errors::ApiError),
+        (status = 429, description = "Rate limit exceeded", body = shared::errors::ApiError),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Likes"
+)]
 pub async fn unlike_content(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -39,6 +71,19 @@ pub async fn unlike_content(
 }
 
 /// GET /v1/likes/:content_type/:content_id/count — Get like count (public)
+#[utoipa::path(
+    get,
+    path = "/v1/likes/{content_type}/{content_id}/count",
+    params(
+        ("content_type" = String, Path, description = "Content type"),
+        ("content_id" = Uuid, Path, description = "Content ID"),
+    ),
+    responses(
+        (status = 200, description = "Like count retrieved", body = LikeCountResponse),
+        (status = 400, description = "Invalid content type or ID", body = shared::errors::ApiError),
+    ),
+    tag = "Likes"
+)]
 pub async fn get_count(
     State(state): State<AppState>,
     ContentPath(content_type, content_id): ContentPath,
@@ -51,6 +96,21 @@ pub async fn get_count(
 }
 
 /// GET /v1/likes/:content_type/:content_id/status — Get like status (auth)
+#[utoipa::path(
+    get,
+    path = "/v1/likes/{content_type}/{content_id}/status",
+    params(
+        ("content_type" = String, Path, description = "Content type"),
+        ("content_id" = Uuid, Path, description = "Content ID"),
+    ),
+    responses(
+        (status = 200, description = "Like status retrieved", body = LikeStatusResponse),
+        (status = 400, description = "Invalid content type or ID", body = shared::errors::ApiError),
+        (status = 401, description = "Unauthorized", body = shared::errors::ApiError),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Likes"
+)]
 pub async fn get_status(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -64,6 +124,22 @@ pub async fn get_status(
 }
 
 /// GET /v1/likes/user — Get user's liked items (auth, paginated)
+#[utoipa::path(
+    get,
+    path = "/v1/likes/user",
+    params(
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i64>, Query, description = "Max items to return"),
+        ("content_type" = Option<String>, Query, description = "Filter by content type"),
+    ),
+    responses(
+        (status = 200, description = "User likes retrieved", body = PaginatedUserLikes),
+        (status = 400, description = "Invalid cursor or parameters", body = shared::errors::ApiError),
+        (status = 401, description = "Unauthorized", body = shared::errors::ApiError),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "User Likes"
+)]
 pub async fn get_user_likes(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -79,10 +155,20 @@ pub async fn get_user_likes(
             limit,
         )
         .await?;
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::OK, Json(PaginatedUserLikes::from(response))))
 }
 
 /// POST /v1/likes/batch/counts — Batch like counts (public)
+#[utoipa::path(
+    post,
+    path = "/v1/likes/batch/counts",
+    request_body = BatchRequest,
+    responses(
+        (status = 200, description = "Batch counts retrieved", body = BatchCountsResponse),
+        (status = 400, description = "Invalid request or batch too large", body = shared::errors::ApiError),
+    ),
+    tag = "Batch"
+)]
 pub async fn batch_counts(
     State(state): State<AppState>,
     Json(body): Json<BatchRequest>,
@@ -95,11 +181,23 @@ pub async fn batch_counts(
     let results = state.like_service().batch_counts(&items).await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "results": results })),
+        Json(BatchCountsResponse { results }),
     ))
 }
 
 /// POST /v1/likes/batch/statuses — Batch like statuses (auth)
+#[utoipa::path(
+    post,
+    path = "/v1/likes/batch/statuses",
+    request_body = BatchRequest,
+    responses(
+        (status = 200, description = "Batch statuses retrieved", body = BatchStatusesResponse),
+        (status = 400, description = "Invalid request or batch too large", body = shared::errors::ApiError),
+        (status = 401, description = "Unauthorized", body = shared::errors::ApiError),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Batch"
+)]
 pub async fn batch_statuses(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -116,19 +214,35 @@ pub async fn batch_statuses(
         .await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "results": results })),
+        Json(BatchStatusesResponse { results }),
     ))
 }
 
 /// Query params for leaderboard.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, ToSchema, utoipa::IntoParams)]
 pub struct LeaderboardParams {
+    /// Filter by content type
+    #[schema(example = "post")]
     pub content_type: Option<String>,
+    /// Time window: 24h, 7d, 30d, all
+    #[schema(example = "7d")]
     pub window: Option<String>,
+    /// Max items to return (default 10, max 50)
+    #[schema(example = 10)]
     pub limit: Option<i64>,
 }
 
 /// GET /v1/likes/top — Top liked content (public)
+#[utoipa::path(
+    get,
+    path = "/v1/likes/top",
+    params(LeaderboardParams),
+    responses(
+        (status = 200, description = "Leaderboard retrieved", body = TopLikedResponse),
+        (status = 400, description = "Invalid parameters", body = shared::errors::ApiError),
+    ),
+    tag = "Leaderboard"
+)]
 pub async fn get_leaderboard(
     State(state): State<AppState>,
     Query(params): Query<LeaderboardParams>,
