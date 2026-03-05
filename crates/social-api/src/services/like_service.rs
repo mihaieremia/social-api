@@ -16,7 +16,7 @@ use crate::repositories::like_repository;
 pub struct LikeService {
     db: DbPools,
     cache: CacheManager,
-    content_validator: HttpContentValidator,
+    content_validator: Arc<dyn ContentValidator>,
     config: Config,
     content_breaker: Arc<CircuitBreaker>,
 }
@@ -29,8 +29,9 @@ impl LikeService {
         config: Config,
         content_breaker: Arc<CircuitBreaker>,
     ) -> Self {
-        let content_validator =
-            HttpContentValidator::new(http_client, cache.clone(), config.clone());
+        let content_validator: Arc<dyn ContentValidator> = Arc::new(
+            HttpContentValidator::new(http_client, cache.clone(), config.clone()),
+        );
         Self {
             db,
             cache,
@@ -62,16 +63,11 @@ impl LikeService {
         let count = if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
             // Fetch DB count as fallback for conditional INCR
-            let db_count =
-                like_repository::get_count(&self.db.reader, content_type, content_id)
-                    .await
-                    .map_err(|e| AppError::Database(e.to_string()))?;
+            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
             self.cache
-                .conditional_incr(
-                    &cache_key,
-                    self.config.cache_ttl_like_counts_secs,
-                    db_count,
-                )
+                .conditional_incr(&cache_key, self.config.cache_ttl_like_counts_secs, db_count)
                 .await
                 .unwrap_or(db_count)
         } else {
@@ -116,16 +112,11 @@ impl LikeService {
         // Update cache with conditional DECR (safe against expired keys)
         let count = if was_liked {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            let db_count =
-                like_repository::get_count(&self.db.reader, content_type, content_id)
-                    .await
-                    .map_err(|e| AppError::Database(e.to_string()))?;
+            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
             self.cache
-                .conditional_decr(
-                    &cache_key,
-                    self.config.cache_ttl_like_counts_secs,
-                    db_count,
-                )
+                .conditional_decr(&cache_key, self.config.cache_ttl_like_counts_secs, db_count)
                 .await
                 .unwrap_or(db_count)
         } else {
