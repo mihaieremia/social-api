@@ -65,20 +65,6 @@ struct RateLimitResult {
     reset_secs: u64,
 }
 
-/// Internal abstraction over the sliding-window Lua script.
-/// Kept private — not exposed through AppState.
-#[async_trait::async_trait]
-trait SlidingWindow: Send + Sync {
-    async fn check(&self, key: &str, limit: u64, window_secs: u64) -> RateLimitResult;
-}
-
-#[async_trait::async_trait]
-impl SlidingWindow for CacheManager {
-    async fn check(&self, key: &str, limit: u64, window_secs: u64) -> RateLimitResult {
-        check_rate_limit_inner(self, key, limit, window_secs).await
-    }
-}
-
 /// Check rate limit using Redis sliding window.
 async fn check_rate_limit_inner(
     cache: &CacheManager,

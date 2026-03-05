@@ -128,21 +128,6 @@ impl CacheManager {
         }
     }
 
-    /// Delete a key. Silently fails on Redis error.
-    #[allow(dead_code)]
-    pub async fn del(&self, key: &str) {
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis pool GET failed");
-                return;
-            }
-        };
-        if let Err(e) = conn.del::<_, ()>(key).await {
-            tracing::warn!(key = key, error = %e, "Redis DEL failed");
-        }
-    }
-
     /// Conditionally INCR: if key exists, INCR + refresh TTL. If missing, SET to db_count.
     /// Prevents ghost counts when INCR hits an expired key.
     pub async fn conditional_incr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
@@ -240,34 +225,6 @@ impl CacheManager {
         }
     }
 
-    /// Set a key with TTL only if it doesn't exist (for stampede lock).
-    /// Returns true if the key was set (did not previously exist).
-    #[allow(dead_code)]
-    pub async fn set_nx(&self, key: &str, value: &str, ttl_secs: u64) -> bool {
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        // SET key value NX EX ttl
-        let result: Result<bool, _> = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async(&mut *conn)
-            .await;
-
-        match result {
-            Ok(acquired) => acquired,
-            Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis SET NX failed");
-                false
-            }
-        }
-    }
-
     /// Get multiple keys at once (MGET). Returns Vec with None for misses.
     pub async fn mget(&self, keys: &[String]) -> Vec<Option<String>> {
         if keys.is_empty() {
@@ -299,42 +256,6 @@ impl CacheManager {
                 counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis MGET failed");
                 vec![None; keys.len()]
-            }
-        }
-    }
-
-    /// Pipeline SET EX for multiple keys. Single round-trip instead of N sequential SETs.
-    pub async fn mset_ex(&self, entries: &[(&str, &str, u64)]) {
-        if entries.is_empty() {
-            return;
-        }
-
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
-                tracing::warn!(error = %e, "Redis pool GET failed for MSET pipeline");
-                return;
-            }
-        };
-
-        let mut pipe = redis::pipe();
-        for (key, value, ttl) in entries {
-            pipe.cmd("SET")
-                .arg(*key)
-                .arg(*value)
-                .arg("EX")
-                .arg(*ttl)
-                .ignore();
-        }
-
-        match pipe.query_async::<()>(&mut *conn).await {
-            Ok(()) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "ok").increment(entries.len() as u64);
-            }
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
-                tracing::warn!(error = %e, "Redis MSET pipeline failed");
             }
         }
     }

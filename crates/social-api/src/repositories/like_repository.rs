@@ -248,42 +248,6 @@ pub async fn get_user_likes(
     }
 }
 
-/// Batch get like counts from the like_counts table.
-/// Currently unused — batch_counts routes through get_count_inner for stampede coalescing.
-/// Retained for potential direct-batch use cases (e.g., leaderboard refresh).
-#[allow(dead_code)]
-pub async fn batch_get_counts(
-    pool: &PgPool,
-    items: &[(String, Uuid)],
-) -> Result<Vec<(String, Uuid, i64)>, sqlx::Error> {
-    if items.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Build dynamic query for batch lookup
-    let mut content_types = Vec::with_capacity(items.len());
-    let mut content_ids = Vec::with_capacity(items.len());
-    for (ct, cid) in items {
-        content_types.push(ct.as_str());
-        content_ids.push(*cid);
-    }
-
-    // Use unnest for efficient batch lookup
-    let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(
-        r#"
-        SELECT req.content_type, req.content_id, COALESCE(lc.total_count, 0) AS total_count
-        FROM unnest($1::text[], $2::uuid[]) AS req(content_type, content_id)
-        LEFT JOIN like_counts lc ON lc.content_type = req.content_type AND lc.content_id = req.content_id
-        "#,
-    )
-    .bind(&content_types)
-    .bind(&content_ids)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
-}
-
 /// Batch get like statuses for a user.
 pub async fn batch_get_statuses(
     pool: &PgPool,
@@ -507,35 +471,6 @@ mod tests {
             .await
             .unwrap();
         assert!(ts.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_batch_get_counts() {
-        let (pool, _pg) = setup_pg().await;
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        for _ in 0..3 {
-            insert_like(&pool, Uuid::new_v4(), "post", id1)
-                .await
-                .unwrap();
-        }
-        insert_like(&pool, Uuid::new_v4(), "post", id2).await.unwrap();
-
-        let counts = batch_get_counts(
-            &pool,
-            &[("post".to_string(), id1), ("post".to_string(), id2)],
-        )
-        .await
-        .unwrap();
-
-        let map: std::collections::HashMap<_, _> = counts
-            .into_iter()
-            .map(|(ct, cid, c)| ((ct, cid), c))
-            .collect();
-
-        assert_eq!(map[&("post".to_string(), id1)], 3);
-        assert_eq!(map[&("post".to_string(), id2)], 1);
     }
 
     #[tokio::test]
