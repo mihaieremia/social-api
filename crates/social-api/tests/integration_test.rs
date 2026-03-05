@@ -812,11 +812,7 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
     }
 
     // Verify the breaker is now open by checking metrics
-    let resp = c
-        .get(format!("{BASE_URL}/metrics"))
-        .send()
-        .await
-        .unwrap();
+    let resp = c.get(format!("{BASE_URL}/metrics")).send().await.unwrap();
     let metrics_body = resp.text().await.unwrap();
 
     // Circuit breaker gauge should show 2.0 (Open state)

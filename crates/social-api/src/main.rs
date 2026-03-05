@@ -110,7 +110,10 @@ async fn main() {
             );
             break;
         }
-        tracing::debug!(inflight = count, "Waiting for in-flight requests to drain...");
+        tracing::debug!(
+            inflight = count,
+            "Waiting for in-flight requests to drain..."
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 

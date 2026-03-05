@@ -531,6 +531,7 @@
                 "spanNulls": false
               },
               "mappings": [],
+              "noValue": "None - Healthy",
               "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
               "unit": "reqps"
             },
@@ -683,30 +684,113 @@
           "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
           "id": 15,
           "options": {
-            "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+            "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right" },
             "tooltip": { "mode": "multi", "sort": "desc" }
           },
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "histogram_quantile(0.5, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[$interval])))",
-              "legendFormat": "p50 {{path}}",
+              "legendFormat": "{{path}}",
               "refId": "A"
+            }
+          ],
+          "title": "p50 Latency by Endpoint",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.05 }
+                ]
+              },
+              "unit": "s"
             },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+          "id": 40,
+          "options": {
+            "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "histogram_quantile(0.95, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[$interval])))",
-              "legendFormat": "p95 {{path}}",
-              "refId": "B"
+              "legendFormat": "{{path}}",
+              "refId": "A"
+            }
+          ],
+          "title": "p95 Latency by Endpoint",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "thresholdsStyle": { "mode": "line" }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.1 },
+                  { "color": "red", "value": 0.25 }
+                ]
+              },
+              "unit": "s"
             },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+          "id": 41,
+          "options": {
+            "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right" },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "histogram_quantile(0.99, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[$interval])))",
-              "legendFormat": "p99 {{path}}",
-              "refId": "C"
+              "legendFormat": "{{path}}",
+              "refId": "A"
             }
           ],
-          "title": "Latency by Endpoint",
+          "title": "p99 Latency by Endpoint",
           "type": "timeseries"
         },
         {
@@ -720,10 +804,10 @@
             },
             "overrides": []
           },
-          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
           "id": 16,
           "options": {
-            "calculate": true,
+            "calculate": false,
             "cellGap": 1,
             "color": {
               "exponent": 0.5,
@@ -773,15 +857,22 @@
                 "lineWidth": 2,
                 "pointSize": 5,
                 "showPoints": "never",
-                "spanNulls": false
+                "spanNulls": false,
+                "thresholdsStyle": { "mode": "line" }
               },
               "mappings": [],
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "red", "value": 0.02 }
+                ]
+              },
               "unit": "reqps"
             },
             "overrides": []
           },
-          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
           "id": 17,
           "options": {
             "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
@@ -910,6 +1001,7 @@
                 "spanNulls": false
               },
               "mappings": [],
+              "noValue": "None - Healthy",
               "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
               "unit": "ops"
             },
@@ -1046,6 +1138,7 @@
                 "spanNulls": false
               },
               "mappings": [],
+              "noValue": "None - Healthy",
               "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
               "unit": "reqps"
             },
@@ -1083,10 +1176,17 @@
                 "lineWidth": 2,
                 "pointSize": 5,
                 "showPoints": "never",
-                "spanNulls": false
+                "spanNulls": false,
+                "thresholdsStyle": { "mode": "line" }
               },
               "mappings": [],
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.2 }
+                ]
+              },
               "unit": "s"
             },
             "overrides": []
@@ -1122,7 +1222,7 @@
           "gridPos": { "h": 8, "w": 5, "x": 15, "y": 33 },
           "id": 25,
           "options": {
-            "calculate": true,
+            "calculate": false,
             "cellGap": 1,
             "color": {
               "exponent": 0.5,
@@ -1195,7 +1295,10 @@
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "social_api_circuit_breaker_state",
               "legendFormat": "{{service}}",
-              "refId": "A"
+              "refId": "A",
+              "instant": false,
+              "range": true,
+              "format": "time_series"
             }
           ],
           "title": "Circuit Breaker Timeline",
@@ -1225,7 +1328,9 @@
                 "lineWidth": 2,
                 "pointSize": 5,
                 "showPoints": "never",
-                "spanNulls": false
+                "spanNulls": false,
+                "stacking": { "group": "A", "mode": "normal" },
+                "thresholdsStyle": { "mode": "line" }
               },
               "mappings": [],
               "thresholds": {
@@ -1249,8 +1354,8 @@
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
-              "expr": "pg_stat_activity_count",
-              "legendFormat": "Active Connections",
+              "expr": "sum by (state) (pg_stat_activity_count{datname=\"social_api\"})",
+              "legendFormat": "{{state}}",
               "refId": "A"
             }
           ],
@@ -1416,6 +1521,7 @@
                 "spanNulls": false
               },
               "mappings": [],
+              "noValue": "None - Healthy",
               "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
               "unit": "ops"
             },

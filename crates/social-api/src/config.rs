@@ -48,6 +48,7 @@ pub struct Config {
 
     // SSE
     pub sse_heartbeat_interval_secs: u64,
+    pub sse_broadcast_capacity: usize,
 
     // Leaderboard
     pub leaderboard_refresh_interval_secs: u64,
@@ -122,6 +123,7 @@ impl Config {
             circuit_breaker_rate_window_secs: env_or_default("CIRCUIT_BREAKER_RATE_WINDOW_SECS", 30),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
+            sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 128),
             leaderboard_refresh_interval_secs: env_or_default(
                 "LEADERBOARD_REFRESH_INTERVAL_SECS",
                 60,
@@ -149,17 +151,14 @@ impl Config {
             "bonus_hunter".to_string(),
             "http://localhost:8081".to_string(),
         );
-        content_api_urls.insert(
-            "top_picks".to_string(),
-            "http://localhost:8081".to_string(),
-        );
+        content_api_urls.insert("top_picks".to_string(), "http://localhost:8081".to_string());
 
         Self {
             http_port: 8080,
             database_url: "postgres://social:social_password@localhost:5432/social_api_test"
                 .to_string(),
-            read_database_url:
-                "postgres://social:social_password@localhost:5432/social_api_test".to_string(),
+            read_database_url: "postgres://social:social_password@localhost:5432/social_api_test"
+                .to_string(),
             redis_url: "redis://localhost:6379".to_string(),
             content_api_urls,
             profile_api_url: "http://localhost:8081".to_string(),
@@ -179,6 +178,7 @@ impl Config {
             leaderboard_refresh_interval_secs: 300,
             shutdown_timeout_secs: 30,
             sse_heartbeat_interval_secs: 15,
+            sse_broadcast_capacity: 128,
             log_level: "info".to_string(),
         }
     }

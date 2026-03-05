@@ -363,7 +363,10 @@ mod tests {
     /// Spin up a fresh Postgres container, run migrations, return a pool.
     /// The returned container must be kept alive for the duration of the test.
     async fn setup_pg() -> (sqlx::PgPool, testcontainers::ContainerAsync<Postgres>) {
-        let pg = Postgres::default().start().await.expect("postgres container");
+        let pg = Postgres::default()
+            .start()
+            .await
+            .expect("postgres container");
         let port = pg.get_host_port_ipv4(5432).await.unwrap();
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -399,7 +402,9 @@ mod tests {
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
-        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
         let (_, existed) = insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
@@ -413,7 +418,9 @@ mod tests {
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
-        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
         let was_liked = delete_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
@@ -456,7 +463,9 @@ mod tests {
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
-        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
         let ts = get_like_status(&pool, user_id, "post", content_id)
             .await
             .unwrap();
@@ -546,12 +555,18 @@ mod tests {
         let id3 = Uuid::new_v4();
 
         for _ in 0..3 {
-            insert_like(&pool, Uuid::new_v4(), "post", id1).await.unwrap();
+            insert_like(&pool, Uuid::new_v4(), "post", id1)
+                .await
+                .unwrap();
         }
         for _ in 0..2 {
-            insert_like(&pool, Uuid::new_v4(), "post", id2).await.unwrap();
+            insert_like(&pool, Uuid::new_v4(), "post", id2)
+                .await
+                .unwrap();
         }
-        insert_like(&pool, Uuid::new_v4(), "post", id3).await.unwrap();
+        insert_like(&pool, Uuid::new_v4(), "post", id3)
+            .await
+            .unwrap();
 
         let rows = get_leaderboard(&pool, None, None, 10).await.unwrap();
 

@@ -125,6 +125,8 @@ function authHeaders(token) {
 // ---------------------------------------------------------------------------
 
 const ALL_SCENARIOS = {
+  // --- Sequential mode (default): run one after another ---
+
   // Isolated: 10k rps reads
   read_path: {
     executor: 'constant-arrival-rate',
@@ -148,7 +150,7 @@ const ALL_SCENARIOS = {
     preAllocatedVUs: 50,
     maxVUs: 100,
     gracefulStop: '10s',
-    startTime: '70s', // after read_path finishes
+    startTime: '70s',
     tags: { scenario: 'batch_path' },
   },
 
@@ -162,7 +164,7 @@ const ALL_SCENARIOS = {
     preAllocatedVUs: 50,
     maxVUs: 100,
     gracefulStop: '10s',
-    startTime: '140s', // after batch_path finishes
+    startTime: '140s',
     tags: { scenario: 'write_path' },
   },
 
@@ -176,14 +178,118 @@ const ALL_SCENARIOS = {
     preAllocatedVUs: 100,
     maxVUs: 200,
     gracefulStop: '10s',
-    startTime: '210s', // after write_path finishes
+    startTime: '210s',
     tags: { scenario: 'mixed' },
   },
 };
 
-// Filter to single scenario if K6_SCENARIO is set.
-// When running a single scenario, strip startTime so it begins immediately.
+// --- Parallel mode: all scenarios fire simultaneously ---
+// Run with: K6_SCENARIO=parallel k6 run k6/load_test.js
+
+const PARALLEL_SCENARIOS = {
+  // Reads: 8k rps
+  parallel_read: {
+    executor: 'constant-arrival-rate',
+    exec: 'readCount',
+    rate: 8000,
+    timeUnit: '1s',
+    duration: '90s',
+    preAllocatedVUs: 200,
+    maxVUs: 400,
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_read' },
+  },
+
+  // Batch: 500 rps
+  parallel_batch: {
+    executor: 'constant-arrival-rate',
+    exec: 'batchCounts',
+    rate: 500,
+    timeUnit: '1s',
+    duration: '90s',
+    preAllocatedVUs: 50,
+    maxVUs: 100,
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_batch' },
+  },
+
+  // Writes: 300 rps (like/unlike cycling)
+  parallel_write: {
+    executor: 'constant-arrival-rate',
+    exec: 'writeCycle',
+    rate: 300,
+    timeUnit: '1s',
+    duration: '90s',
+    preAllocatedVUs: 50,
+    maxVUs: 100,
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_write' },
+  },
+
+  // SSE: ramp connections from 0 to target over 30s, hold, then drain
+  parallel_sse: {
+    executor: 'ramping-vus',
+    exec: 'sseSubscribe',
+    startVUs: 0,
+    stages: [
+      { duration: '15s', target: 200 },  // ramp up to 200 connections
+      { duration: '60s', target: 200 },  // hold 200 SSE connections
+      { duration: '15s', target: 0 },    // drain
+    ],
+    gracefulRampDown: '10s',
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_sse' },
+  },
+};
+
+// --- SSE stress test: push connections to the limit ---
+// Run with: K6_SCENARIO=sse_stress k6 run k6/load_test.js
+
+const SSE_STRESS_SCENARIOS = {
+  // Background writes to generate real SSE events
+  sse_stress_writes: {
+    executor: 'constant-arrival-rate',
+    exec: 'writeCycle',
+    rate: 200,
+    timeUnit: '1s',
+    duration: '120s',
+    preAllocatedVUs: 30,
+    maxVUs: 60,
+    gracefulStop: '10s',
+    tags: { scenario: 'sse_stress_writes' },
+  },
+
+  // SSE connections: ramp 0 -> 500 -> 1000 -> 2000, hold, drain
+  sse_stress_connections: {
+    executor: 'ramping-vus',
+    exec: 'sseSubscribe',
+    startVUs: 0,
+    stages: [
+      { duration: '15s', target: 500 },
+      { duration: '30s', target: 500 },
+      { duration: '15s', target: 1000 },
+      { duration: '30s', target: 1000 },
+      { duration: '15s', target: 2000 },
+      { duration: '30s', target: 2000 },
+      { duration: '15s', target: 0 },
+    ],
+    gracefulRampDown: '15s',
+    gracefulStop: '10s',
+    tags: { scenario: 'sse_stress_connections' },
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Scenario selector
+// ---------------------------------------------------------------------------
+
 function buildScenarios() {
+  if (ONLY_SCENARIO === 'parallel') {
+    return PARALLEL_SCENARIOS;
+  }
+  if (ONLY_SCENARIO === 'sse_stress') {
+    return SSE_STRESS_SCENARIOS;
+  }
   if (ONLY_SCENARIO && ALL_SCENARIOS[ONLY_SCENARIO]) {
     const s = Object.assign({}, ALL_SCENARIOS[ONLY_SCENARIO]);
     delete s.startTime;
@@ -192,19 +298,35 @@ function buildScenarios() {
   return ALL_SCENARIOS;
 }
 
-export const options = {
-  scenarios: buildScenarios(),
-
-  thresholds: {
-    // Per-scenario p99 latency
+function buildThresholds() {
+  if (ONLY_SCENARIO === 'parallel') {
+    return {
+      'http_req_duration{scenario:parallel_read}': ['p(99)<15'],
+      'http_req_duration{scenario:parallel_batch}': ['p(99)<75'],
+      'http_req_duration{scenario:parallel_write}': ['p(99)<150'],
+      // Exclude SSE from error rate — timeouts are expected for streaming
+      'http_req_failed{scenario:parallel_read}': ['rate<0.01'],
+      'http_req_failed{scenario:parallel_batch}': ['rate<0.01'],
+      'http_req_failed{scenario:parallel_write}': ['rate<0.01'],
+    };
+  }
+  if (ONLY_SCENARIO === 'sse_stress') {
+    return {
+      'http_req_failed{scenario:sse_stress_writes}': ['rate<0.05'],
+    };
+  }
+  return {
     'http_req_duration{scenario:read_path}': ['p(99)<10'],
     'http_req_duration{scenario:batch_path}': ['p(99)<50'],
     'http_req_duration{scenario:write_path}': ['p(99)<100'],
     'http_req_duration{scenario:mixed}': ['p(99)<100'],
-
-    // Global error rate < 1%
     http_req_failed: ['rate<0.01'],
-  },
+  };
+}
+
+export const options = {
+  scenarios: buildScenarios(),
+  thresholds: buildThresholds(),
 };
 
 // ---------------------------------------------------------------------------
@@ -221,7 +343,7 @@ export function readCount() {
   check(res, {
     'read: status ok': (r) => r.status === 200 || r.status === 429,
     'read: has count': (r) => {
-      if (r.status === 429) return true; // rate limited is expected under load
+      if (r.status === 429) return true;
       try {
         return JSON.parse(r.body).count !== undefined;
       } catch (_) {
@@ -321,6 +443,29 @@ export function mixedWorkload() {
   } else {
     writeCycle();
   }
+}
+
+// SSE: open a connection, hold it for a duration, then close.
+// k6's http.get() blocks until timeout, which is exactly what we want —
+// each VU holds one SSE connection for the timeout period.
+// The real metric is social_api_sse_connections_active in Grafana.
+export function sseSubscribe() {
+  const { content_type, content_id } = randomContent();
+  const url = `${BASE_URL}/v1/likes/stream?content_type=${content_type}&content_id=${content_id}`;
+
+  // Hold the connection open for 20s (k6 will read the streaming body until timeout)
+  const res = http.get(url, {
+    tags: { name: 'GET_sse_stream' },
+    timeout: '20s',
+    responseType: 'text',
+  });
+
+  // k6 sets status=0 on timeout for streaming responses, so check body instead.
+  // The server sends heartbeats every 30s, so we should get at least the headers.
+  check(res, {
+    'sse: received heartbeat or event': (r) =>
+      r.body && r.body.includes('event'),
+  });
 }
 
 // Default export for CLI override usage (k6 run --vus 5 --duration 10s)

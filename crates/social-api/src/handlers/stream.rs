@@ -5,16 +5,17 @@ use axum::{
         sse::{Event, Sse},
     },
 };
-use futures::StreamExt;
 use futures::stream::Stream;
 use serde::Deserialize;
 use shared::errors::AppError;
 use std::convert::Infallible;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::errors::ApiErrorResponse;
+use crate::services::pubsub_manager::PubSubManager;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -54,20 +55,20 @@ pub async fn like_stream(
 
     let channel = format!("sse:{}:{}", params.content_type, params.content_id);
     let heartbeat_secs = state.config().sse_heartbeat_interval_secs;
-    let redis_url = state.config().redis_url.clone();
     let shutdown_token = state.shutdown_token().clone();
+    let pubsub_manager = state.pubsub_manager().clone();
 
-    let stream = create_sse_stream(redis_url, channel, heartbeat_secs, shutdown_token);
+    let stream = create_sse_stream(pubsub_manager, channel, heartbeat_secs, shutdown_token);
 
     // No KeepAlive — our select! loop sends spec-compliant JSON heartbeats.
     Ok(Sse::new(stream))
 }
 
-/// Creates an SSE stream that subscribes to a Redis Pub/Sub channel.
-/// Uses a dedicated Redis connection (not from pool) for the subscription.
-/// Monitors the CancellationToken for graceful shutdown.
+/// Creates an SSE stream that subscribes via the shared PubSubManager.
+/// Uses a single Redis connection per channel (shared across all SSE clients
+/// on the same channel) instead of one Redis connection per client.
 fn create_sse_stream(
-    redis_url: String,
+    pubsub_manager: PubSubManager,
     channel: String,
     heartbeat_secs: u64,
     shutdown_token: CancellationToken,
@@ -84,35 +85,19 @@ fn create_sse_stream(
         }
         let _guard = SseGuard;
 
-        // Create a dedicated Redis connection for Pub/Sub
-        let client = match redis::Client::open(redis_url.as_str()) {
-            Ok(c) => c,
+        // Subscribe via the shared PubSubManager (one Redis conn per channel)
+        let mut rx: broadcast::Receiver<String> = match pubsub_manager.subscribe(&channel).await {
+            Ok(rx) => rx,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to create Redis client for SSE");
+                tracing::warn!(error = %e, channel = %channel, "Failed to subscribe via PubSubManager");
                 yield Ok(Event::default().event("error").data(r#"{"error":"Redis unavailable"}"#));
                 return;
             }
         };
 
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(ps) => ps,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to get Pub/Sub connection for SSE");
-                yield Ok(Event::default().event("error").data(r#"{"error":"Redis unavailable"}"#));
-                return;
-            }
-        };
-
-        if let Err(e) = pubsub.subscribe(&channel).await {
-            tracing::warn!(error = %e, channel = %channel, "Failed to subscribe to SSE channel");
-            yield Ok(Event::default().event("error").data(r#"{"error":"Subscribe failed"}"#));
-            return;
-        }
-
-        tracing::debug!(channel = %channel, "SSE client subscribed");
+        tracing::debug!(channel = %channel, "SSE client subscribed via shared PubSub");
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs));
-        let mut msg_stream = pubsub.on_message();
 
         loop {
             tokio::select! {
@@ -125,15 +110,21 @@ fn create_sse_stream(
                     tracing::debug!(channel = %channel, "SSE stream closed by shutdown");
                     break;
                 }
-                msg = msg_stream.next() => {
-                    match msg {
-                        Some(msg) => {
-                            if let Ok(payload) = msg.get_payload::<String>() {
-                                yield Ok(Event::default().data(payload));
-                            }
+                result = rx.recv() => {
+                    match result {
+                        Ok(payload) => {
+                            yield Ok(Event::default().data(payload));
                         }
-                        None => {
-                            // Redis channel closed unexpectedly
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // Client fell behind — skip to latest, log it
+                            tracing::debug!(
+                                channel = %channel,
+                                skipped = n,
+                                "SSE client lagged, skipped messages"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            // Bridge task ended (Redis disconnected)
                             let ts = chrono::Utc::now().to_rfc3339();
                             yield Ok(Event::default().data(
                                 format!(r#"{{"event":"shutdown","timestamp":"{ts}"}}"#)

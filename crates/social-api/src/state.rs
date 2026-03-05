@@ -10,6 +10,7 @@ use crate::clients::profile_client::HttpTokenValidator;
 use crate::config::Config;
 use crate::db::DbPools;
 use crate::services::like_service::LikeService;
+use crate::services::pubsub_manager::PubSubManager;
 
 /// Shared application state, passed to all handlers via Axum's State extractor.
 /// Wrapped in Arc for cheap cloning across handler tasks.
@@ -27,6 +28,7 @@ struct AppStateInner {
     token_validator: HttpTokenValidator,
     profile_breaker: Arc<CircuitBreaker>,
     content_breaker: Arc<CircuitBreaker>,
+    pubsub_manager: PubSubManager,
     shutdown_token: CancellationToken,
     inflight_count: AtomicUsize,
 }
@@ -79,6 +81,9 @@ impl AppState {
             content_breaker.clone(),
         );
 
+        let pubsub_manager =
+            PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
+
         Self {
             inner: Arc::new(AppStateInner {
                 db,
@@ -89,6 +94,7 @@ impl AppState {
                 token_validator,
                 profile_breaker,
                 content_breaker,
+                pubsub_manager,
                 shutdown_token,
                 inflight_count: AtomicUsize::new(0),
             }),
@@ -125,6 +131,10 @@ impl AppState {
 
     pub fn content_breaker(&self) -> &CircuitBreaker {
         &self.inner.content_breaker
+    }
+
+    pub fn pubsub_manager(&self) -> &PubSubManager {
+        &self.inner.pubsub_manager
     }
 
     pub fn shutdown_token(&self) -> &CancellationToken {

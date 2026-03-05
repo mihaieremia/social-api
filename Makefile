@@ -201,10 +201,14 @@ COVERAGE_DIR := coverage
 
 COVERAGE_EXCLUDE := crates/mock-services
 
-coverage: ## Generate LCOV + Markdown coverage report (unit tests; output: coverage/)
+coverage: ## Full coverage report: unit + integration tests (requires Docker + make up; output: coverage/)
 	@mkdir -p $(COVERAGE_DIR)
-	cargo llvm-cov --workspace --lcov --output-path $(COVERAGE_DIR)/lcov.info \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)'
+	cargo llvm-cov --workspace --all-targets \
+	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	  --lcov --output-path $(COVERAGE_DIR)/lcov.info \
+	  -- --include-ignored --test-threads=1 \
+	     --skip test_rate_limit_write_endpoint \
+	     --skip test_circuit_breaker_trips_on_profile_api_failure
 	@{ \
 	  echo "# Coverage Report"; \
 	  echo ""; \

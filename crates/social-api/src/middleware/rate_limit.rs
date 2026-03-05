@@ -364,8 +364,7 @@ mod tests {
         let mut config = crate::config::Config::new_for_test();
         config.redis_url = "redis://127.0.0.1:19999".to_string();
         // bb8 pool with fast timeout so the test doesn't hang
-        let manager =
-            bb8_redis::RedisConnectionManager::new(config.redis_url.as_str()).unwrap();
+        let manager = bb8_redis::RedisConnectionManager::new(config.redis_url.as_str()).unwrap();
         let pool = bb8::Pool::builder()
             .connection_timeout(std::time::Duration::from_millis(100))
             .build(manager)

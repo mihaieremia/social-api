@@ -201,10 +201,7 @@ pub async fn batch_counts(
         .map(|i| (i.content_type, i.content_id))
         .collect();
     let results = state.like_service().batch_counts(&items).await?;
-    Ok((
-        StatusCode::OK,
-        Json(BatchCountsResponse { results }),
-    ))
+    Ok((StatusCode::OK, Json(BatchCountsResponse { results })))
 }
 
 /// POST /v1/likes/batch/statuses — Batch like statuses (auth)
@@ -239,10 +236,7 @@ pub async fn batch_statuses(
         .like_service()
         .batch_statuses(user.user_id, &items)
         .await?;
-    Ok((
-        StatusCode::OK,
-        Json(BatchStatusesResponse { results }),
-    ))
+    Ok((StatusCode::OK, Json(BatchStatusesResponse { results })))
 }
 
 /// Query params for leaderboard.
