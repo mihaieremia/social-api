@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
+use dashmap::DashMap;
 use shared::errors::AppError;
 use shared::types::*;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::cache::manager::CacheManager;
@@ -16,9 +18,13 @@ use crate::repositories::like_repository;
 pub struct LikeService {
     db: DbPools,
     cache: CacheManager,
-    content_validator: HttpContentValidator,
+    /// Trait object — swappable transport (HTTP today, gRPC tomorrow).
+    content_validator: Arc<dyn ContentValidator>,
     config: Config,
     content_breaker: Arc<CircuitBreaker>,
+    /// In-progress cache fetches, keyed by cache key.
+    /// Used for stampede coalescing — see `get_count_inner`.
+    pending_fetches: DashMap<String, watch::Sender<Option<i64>>>,
 }
 
 impl LikeService {
@@ -29,14 +35,18 @@ impl LikeService {
         config: Config,
         content_breaker: Arc<CircuitBreaker>,
     ) -> Self {
-        let content_validator =
-            HttpContentValidator::new(http_client, cache.clone(), config.clone());
+        let content_validator = Arc::new(HttpContentValidator::new(
+            http_client,
+            cache.clone(),
+            config.clone(),
+        ));
         Self {
             db,
             cache,
             content_validator,
             config,
             content_breaker,
+            pending_fetches: DashMap::new(),
         }
     }
 
@@ -56,24 +66,15 @@ impl LikeService {
         let (like_row, already_existed) =
             like_repository::insert_like(&self.db.writer, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
         // Update cache with conditional INCR (safe against expired keys)
         let count = if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            // Fetch DB count as fallback for conditional INCR
-            let db_count =
-                like_repository::get_count(&self.db.reader, content_type, content_id)
-                    .await
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-            self.cache
-                .conditional_incr(
-                    &cache_key,
-                    self.config.cache_ttl_like_counts_secs,
-                    db_count,
-                )
+            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .unwrap_or(db_count)
+                .map_err(Self::db_err)?;
+            self.update_count_cache(&cache_key, 1, db_count).await
         } else {
             self.get_count_inner(content_type, content_id).await?
         };
@@ -111,23 +112,15 @@ impl LikeService {
         let was_liked =
             like_repository::delete_like(&self.db.writer, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
         // Update cache with conditional DECR (safe against expired keys)
         let count = if was_liked {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            let db_count =
-                like_repository::get_count(&self.db.reader, content_type, content_id)
-                    .await
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-            self.cache
-                .conditional_decr(
-                    &cache_key,
-                    self.config.cache_ttl_like_counts_secs,
-                    db_count,
-                )
+            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .unwrap_or(db_count)
+                .map_err(Self::db_err)?;
+            self.update_count_cache(&cache_key, -1, db_count).await
         } else {
             self.get_count_inner(content_type, content_id).await?
         };
@@ -189,7 +182,7 @@ impl LikeService {
             // We got the lock — fetch from DB and populate cache
             let count = like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
             self.cache
                 .set(
@@ -216,7 +209,7 @@ impl LikeService {
             // Fallback to DB directly
             like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))
+                .map_err(Self::db_err)
         }
     }
 
@@ -232,7 +225,7 @@ impl LikeService {
         let liked_at =
             like_repository::get_like_status(&self.db.reader, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
         Ok(LikeStatusResponse {
             liked: liked_at.is_some(),
@@ -268,7 +261,7 @@ impl LikeService {
             limit,
         )
         .await
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        .map_err(Self::db_err)?;
 
         let has_more = rows.len() as i64 > limit;
         let take_n = (limit as usize).min(rows.len());
@@ -346,17 +339,21 @@ impl LikeService {
                 missing_items.push(items[i].clone());
             }
 
+            // Build O(1) lookup index: (content_type, content_id) -> results position.
+            let index: std::collections::HashMap<(String, Uuid), usize> = items
+                .iter()
+                .enumerate()
+                .map(|(i, (ct, cid))| ((ct.clone(), *cid), i))
+                .collect();
+
             let db_counts = like_repository::batch_get_counts(&self.db.reader, &missing_items)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
             // Update results and collect cache entries for pipeline
             let mut cache_entries = Vec::with_capacity(db_counts.len());
             for (ct, cid, count) in db_counts {
-                if let Some(pos) = results
-                    .iter()
-                    .position(|r| r.content_type == ct && r.content_id == cid)
-                {
+                if let Some(&pos) = index.get(&(ct.clone(), cid)) {
                     results[pos].count = count;
                 }
                 cache_entries.push((format!("lc:{ct}:{cid}"), count.to_string()));
@@ -391,7 +388,7 @@ impl LikeService {
 
         let rows = like_repository::batch_get_statuses(&self.db.reader, user_id, items)
             .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(Self::db_err)?;
 
         // Build result map from DB results
         let mut result_map: std::collections::HashMap<
@@ -461,7 +458,7 @@ impl LikeService {
 
         let rows = like_repository::get_leaderboard(&self.db.reader, content_type, since, limit)
             .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(Self::db_err)?;
 
         let mut items = Vec::with_capacity(rows.len());
         for (ct, cid, count) in rows {
@@ -477,6 +474,24 @@ impl LikeService {
             content_type: content_type.map(|s| s.to_string()),
             items,
         })
+    }
+
+    /// Map a sqlx error to AppError::Database.
+    /// Centralizes the repeated `.map_err(|e| AppError::Database(e.to_string()))` pattern.
+    fn db_err(e: sqlx::Error) -> AppError {
+        AppError::Database(e.to_string())
+    }
+
+    /// Apply a conditional INCR (delta > 0) or DECR (delta < 0) to the count cache.
+    /// Returns the new count, falling back to `db_count` on cache error.
+    async fn update_count_cache(&self, key: &str, delta: i64, db_count: i64) -> i64 {
+        let ttl = self.config.cache_ttl_like_counts_secs;
+        let result = if delta > 0 {
+            self.cache.conditional_incr(key, ttl, db_count).await
+        } else {
+            self.cache.conditional_decr(key, ttl, db_count).await
+        };
+        result.unwrap_or(db_count)
     }
 
     /// Validate content exists via external Content API (with circuit breaker).
