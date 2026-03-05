@@ -59,14 +59,25 @@ impl LikeService {
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // Update cache and publish SSE event
-        if !already_existed {
+        // Update cache with conditional INCR (safe against expired keys)
+        let count = if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            self.cache.incr(&cache_key).await;
-        }
-
-        // Get current count
-        let count = self.get_count_inner(content_type, content_id).await?;
+            // Fetch DB count as fallback for conditional INCR
+            let db_count =
+                like_repository::get_count(&self.db.reader, content_type, content_id)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            self.cache
+                .conditional_incr(
+                    &cache_key,
+                    self.config.cache_ttl_like_counts_secs,
+                    db_count,
+                )
+                .await
+                .unwrap_or(db_count)
+        } else {
+            self.get_count_inner(content_type, content_id).await?
+        };
 
         // Publish SSE event
         if !already_existed {
@@ -103,13 +114,24 @@ impl LikeService {
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // Update cache
-        if was_liked {
+        // Update cache with conditional DECR (safe against expired keys)
+        let count = if was_liked {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            self.cache.decr(&cache_key).await;
-        }
-
-        let count = self.get_count_inner(content_type, content_id).await?;
+            let db_count =
+                like_repository::get_count(&self.db.reader, content_type, content_id)
+                    .await
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            self.cache
+                .conditional_decr(
+                    &cache_key,
+                    self.config.cache_ttl_like_counts_secs,
+                    db_count,
+                )
+                .await
+                .unwrap_or(db_count)
+        } else {
+            self.get_count_inner(content_type, content_id).await?
+        };
 
         // Publish SSE event
         if was_liked {
@@ -177,6 +199,9 @@ impl LikeService {
                     self.config.cache_ttl_like_counts_secs,
                 )
                 .await;
+
+            // Release lock immediately so other waiters can read from cache
+            self.cache.del(&lock_key).await;
 
             Ok(count)
         } else {
@@ -324,7 +349,8 @@ impl LikeService {
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
-            // Update results and cache
+            // Update results and collect cache entries for pipeline
+            let mut cache_entries: Vec<(String, String)> = Vec::new();
             for (ct, cid, count) in db_counts {
                 if let Some(pos) = results
                     .iter()
@@ -332,15 +358,17 @@ impl LikeService {
                 {
                     results[pos].count = count;
                 }
-                // Populate cache
-                let cache_key = format!("lc:{ct}:{cid}");
-                self.cache
-                    .set(
-                        &cache_key,
-                        &count.to_string(),
-                        self.config.cache_ttl_like_counts_secs,
-                    )
-                    .await;
+                cache_entries.push((format!("lc:{ct}:{cid}"), count.to_string()));
+            }
+
+            // Populate cache in a single pipeline round-trip
+            if !cache_entries.is_empty() {
+                let ttl = self.config.cache_ttl_like_counts_secs;
+                let entries: Vec<(&str, &str, u64)> = cache_entries
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str(), ttl))
+                    .collect();
+                self.cache.mset_ex(&entries).await;
             }
         }
 

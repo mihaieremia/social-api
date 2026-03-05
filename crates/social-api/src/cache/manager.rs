@@ -1,6 +1,8 @@
 use bb8::Pool;
 use bb8_redis::RedisConnectionManager;
+use metrics::counter;
 use redis::AsyncCommands;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -10,6 +12,51 @@ use crate::config::Config;
 /// All operations catch Redis errors and return None/Ok instead of propagating.
 /// The service continues operating with degraded performance when Redis is down.
 pub type RedisPool = Pool<RedisConnectionManager>;
+
+/// Lua script: atomically INCR an existing key or SET from DB count if missing.
+/// Prevents ghost counts when INCR is called on an expired/non-existent key.
+static CONDITIONAL_INCR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local db_count = tonumber(ARGV[2])
+
+if redis.call('EXISTS', key) == 1 then
+  local val = redis.call('INCRBY', key, 1)
+  redis.call('EXPIRE', key, ttl)
+  return val
+else
+  redis.call('SET', key, db_count, 'EX', ttl)
+  return db_count
+end
+"#,
+    )
+});
+
+/// Lua script: atomically DECR an existing key (floor at 0) or SET from DB count.
+static CONDITIONAL_DECR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local db_count = tonumber(ARGV[2])
+
+if redis.call('EXISTS', key) == 1 then
+  local val = redis.call('DECRBY', key, 1)
+  if tonumber(val) < 0 then
+    redis.call('SET', key, 0, 'EX', ttl)
+    return 0
+  end
+  redis.call('EXPIRE', key, ttl)
+  return val
+else
+  redis.call('SET', key, db_count, 'EX', ttl)
+  return db_count
+end
+"#,
+    )
+});
 
 /// Create a bb8 Redis connection pool from config.
 pub async fn create_pool(config: &Config) -> Result<RedisPool, Box<dyn std::error::Error>> {
@@ -44,8 +91,16 @@ impl CacheManager {
     pub async fn get(&self, key: &str) -> Option<String> {
         let mut conn = self.pool.get().await.ok()?;
         match conn.get::<_, Option<String>>(key).await {
-            Ok(val) => val,
+            Ok(Some(val)) => {
+                counter!("social_api_cache_operations_total", "operation" => "get", "result" => "hit").increment(1);
+                Some(val)
+            }
+            Ok(None) => {
+                counter!("social_api_cache_operations_total", "operation" => "get", "result" => "miss").increment(1);
+                None
+            }
             Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "get", "result" => "error").increment(1);
                 tracing::warn!(key = key, error = %e, "Redis GET failed");
                 None
             }
@@ -57,17 +112,23 @@ impl CacheManager {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "set", "result" => "error").increment(1);
                 tracing::warn!(key = key, error = %e, "Redis pool GET failed");
                 return;
             }
         };
-        if let Err(e) = conn.set_ex::<_, _, ()>(key, value, ttl_secs).await {
-            tracing::warn!(key = key, error = %e, "Redis SET failed");
+        match conn.set_ex::<_, _, ()>(key, value, ttl_secs).await {
+            Ok(()) => {
+                counter!("social_api_cache_operations_total", "operation" => "set", "result" => "ok").increment(1);
+            }
+            Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "set", "result" => "error").increment(1);
+                tracing::warn!(key = key, error = %e, "Redis SET failed");
+            }
         }
     }
 
     /// Delete a key. Silently fails on Redis error.
-    #[allow(dead_code)]
     pub async fn del(&self, key: &str) {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
@@ -81,25 +142,98 @@ impl CacheManager {
         }
     }
 
-    /// Increment a key atomically. Returns new value, or None on error.
-    pub async fn incr(&self, key: &str) -> Option<i64> {
-        let mut conn = self.pool.get().await.ok()?;
-        match conn.incr::<_, _, i64>(key, 1).await {
-            Ok(val) => Some(val),
+    /// Conditionally INCR: if key exists, INCR + refresh TTL. If missing, SET to db_count.
+    /// Prevents ghost counts when INCR hits an expired key.
+    pub async fn conditional_incr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis INCR failed");
+                tracing::warn!(key = key, error = %e, "Redis pool GET failed for conditional_incr");
+                return None;
+            }
+        };
+
+        let ttl_str = ttl_secs.to_string();
+        let db_count_str = db_count.to_string();
+
+        match CONDITIONAL_INCR_SCRIPT
+            .key(key)
+            .arg(ttl_str)
+            .arg(db_count_str)
+            .invoke_async::<i64>(&mut *conn)
+            .await
+        {
+            Ok(val) => {
+                counter!("social_api_cache_operations_total", "operation" => "conditional_incr", "result" => "ok").increment(1);
+                Some(val)
+            }
+            Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "conditional_incr", "result" => "error").increment(1);
+                tracing::warn!(key = key, error = %e, "Redis conditional INCR script failed");
                 None
             }
         }
     }
 
-    /// Decrement a key atomically. Returns new value, or None on error.
-    pub async fn decr(&self, key: &str) -> Option<i64> {
-        let mut conn = self.pool.get().await.ok()?;
-        match conn.decr::<_, _, i64>(key, 1).await {
+    /// Conditionally DECR: if key exists, DECR (floor 0) + refresh TTL. If missing, SET to db_count.
+    pub async fn conditional_decr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(key = key, error = %e, "Redis pool GET failed for conditional_decr");
+                return None;
+            }
+        };
+
+        let ttl_str = ttl_secs.to_string();
+        let db_count_str = db_count.to_string();
+
+        match CONDITIONAL_DECR_SCRIPT
+            .key(key)
+            .arg(ttl_str)
+            .arg(db_count_str)
+            .invoke_async::<i64>(&mut *conn)
+            .await
+        {
+            Ok(val) => {
+                counter!("social_api_cache_operations_total", "operation" => "conditional_decr", "result" => "ok").increment(1);
+                Some(val)
+            }
+            Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "conditional_decr", "result" => "error").increment(1);
+                tracing::warn!(key = key, error = %e, "Redis conditional DECR script failed");
+                None
+            }
+        }
+    }
+
+    /// Invoke a `redis::Script` (auto EVALSHA). Returns raw redis Value, or None on error.
+    pub async fn invoke_script(
+        &self,
+        script: &redis::Script,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Option<redis::Value> {
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Redis pool GET failed for script");
+                return None;
+            }
+        };
+
+        let mut invocation = script.prepare_invoke();
+        for k in keys {
+            invocation.key(*k);
+        }
+        for a in args {
+            invocation.arg(*a);
+        }
+
+        match invocation.invoke_async::<redis::Value>(&mut *conn).await {
             Ok(val) => Some(val),
             Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis DECR failed");
+                tracing::warn!(error = %e, "Redis script EVALSHA/EVAL failed");
                 None
             }
         }
@@ -141,49 +275,64 @@ impl CacheManager {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis pool GET failed for MGET");
                 return vec![None; keys.len()];
             }
         };
 
         match conn.get::<_, Vec<Option<String>>>(keys).await {
-            Ok(vals) => vals,
+            Ok(vals) => {
+                let hits = vals.iter().filter(|v| v.is_some()).count();
+                let misses = vals.len() - hits;
+                if hits > 0 {
+                    counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "hit").increment(hits as u64);
+                }
+                if misses > 0 {
+                    counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "miss").increment(misses as u64);
+                }
+                vals
+            }
             Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis MGET failed");
                 vec![None; keys.len()]
             }
         }
     }
 
-    /// Execute a Lua script. Returns the raw redis Value, or None on error.
-    pub async fn eval_script(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Option<redis::Value> {
+    /// Pipeline SET EX for multiple keys. Single round-trip instead of N sequential SETs.
+    pub async fn mset_ex(&self, entries: &[(&str, &str, u64)]) {
+        if entries.is_empty() {
+            return;
+        }
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "Redis pool GET failed for script");
-                return None;
+                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
+                tracing::warn!(error = %e, "Redis pool GET failed for MSET pipeline");
+                return;
             }
         };
 
-        let mut cmd = redis::cmd("EVAL");
-        cmd.arg(script).arg(keys.len());
-        for k in keys {
-            cmd.arg(*k);
-        }
-        for a in args {
-            cmd.arg(*a);
+        let mut pipe = redis::pipe();
+        for (key, value, ttl) in entries {
+            pipe.cmd("SET")
+                .arg(*key)
+                .arg(*value)
+                .arg("EX")
+                .arg(*ttl)
+                .ignore();
         }
 
-        match cmd.query_async::<redis::Value>(&mut *conn).await {
-            Ok(val) => Some(val),
+        match pipe.query_async::<()>(&mut *conn).await {
+            Ok(()) => {
+                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "ok").increment(entries.len() as u64);
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "Redis EVAL failed");
-                None
+                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
+                tracing::warn!(error = %e, "Redis MSET pipeline failed");
             }
         }
     }
@@ -272,9 +421,4 @@ impl CacheManager {
             .is_ok()
     }
 
-    /// Get the underlying pool for Pub/Sub subscriber connections.
-    #[allow(dead_code)]
-    pub fn pool(&self) -> &RedisPool {
-        &self.pool
-    }
 }

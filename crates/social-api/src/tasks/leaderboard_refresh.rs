@@ -36,6 +36,11 @@ pub fn spawn_leaderboard_refresh(
             "Leaderboard refresh task started"
         );
 
+        // Warm cache immediately on startup (avoids cold-start DB hammering)
+        if let Err(e) = refresh_all_windows(&db, &cache).await {
+            tracing::error!(error = %e, "Initial leaderboard refresh failed");
+        }
+
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 

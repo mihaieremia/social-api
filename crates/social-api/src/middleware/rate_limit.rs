@@ -5,14 +5,18 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use shared::errors::{ApiError, ErrorCode};
+use std::sync::LazyLock;
 
 use crate::cache::manager::CacheManager;
 use crate::state::AppState;
 
 /// Lua script for atomic sliding window rate limiting.
 /// Operations: ZREMRANGEBYSCORE (prune old), ZCARD (count), ZADD (add current).
-/// All in a single EVAL for atomicity.
-const RATE_LIMIT_SCRIPT: &str = r#"
+/// Returns {allowed, count, limit, reset_ms} for accurate Retry-After headers.
+/// Uses redis::Script for automatic EVALSHA caching.
+static RATE_LIMIT_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r#"
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -26,15 +30,32 @@ redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 local count = redis.call('ZCARD', key)
 
 if count >= limit then
-    return {0, count, limit}
+    -- Calculate actual reset time from oldest entry
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local reset_ms = 0
+    if #oldest >= 2 then
+        reset_ms = tonumber(oldest[2]) + window - now
+        if reset_ms < 0 then reset_ms = 0 end
+    end
+    return {0, count, limit, reset_ms}
 end
 
 -- Add current request
 redis.call('ZADD', key, now, member)
-redis.call('EXPIRE', key, window + 10)
+redis.call('EXPIRE', key, math.ceil(window / 1000) + 10)
 
-return {1, count + 1, limit}
-"#;
+-- Calculate reset from oldest entry after add
+local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+local reset_ms = window
+if #oldest >= 2 then
+    reset_ms = tonumber(oldest[2]) + window - now
+    if reset_ms < 0 then reset_ms = 0 end
+end
+
+return {1, count + 1, limit, reset_ms}
+"#,
+    )
+});
 
 /// Rate limit result.
 struct RateLimitResult {
@@ -62,24 +83,33 @@ async fn check_rate_limit(
     let member = format!("{}:{}", now, uuid::Uuid::new_v4());
 
     let result = cache
-        .eval_script(
-            RATE_LIMIT_SCRIPT,
+        .invoke_script(
+            &RATE_LIMIT_SCRIPT,
             &[key],
             &[&now, &window_ms, &limit_str, &member],
         )
         .await;
 
     match result {
-        Some(redis::Value::Array(ref values)) if values.len() == 3 => {
+        Some(redis::Value::Array(ref values)) if values.len() >= 3 => {
             let allowed = extract_int(&values[0]).unwrap_or(1) == 1;
             let current = extract_int(&values[1]).unwrap_or(0);
             let max = extract_int(&values[2]).unwrap_or(limit as i64);
+
+            // Use actual reset time if available (4th value = ms until oldest expires)
+            let reset_secs = if values.len() >= 4 {
+                let reset_ms = extract_int(&values[3]).unwrap_or((window_secs * 1000) as i64);
+                // Convert ms to seconds, ceiling division, clamp to [1, window_secs]
+                ((reset_ms as u64).saturating_add(999) / 1000).clamp(1, window_secs)
+            } else {
+                window_secs
+            };
 
             RateLimitResult {
                 allowed,
                 current,
                 limit: max,
-                reset_secs: window_secs,
+                reset_secs,
             }
         }
         _ => {
@@ -143,7 +173,7 @@ pub async fn write_rate_limit(
         .unwrap_or("")
         .to_string();
 
-    let key = format!("rl:w:{}", simple_hash(&user_token));
+    let key = format!("rl:w:{}", fnv1a_hash(&user_token));
     let limit = state.config().rate_limit_write_per_minute;
     let result = check_rate_limit(state.cache(), &key, limit, 60).await;
 
@@ -176,7 +206,7 @@ pub async fn read_rate_limit(
         .unwrap_or("unknown")
         .to_string();
 
-    let key = format!("rl:r:{}", simple_hash(&ip));
+    let key = format!("rl:r:{}", fnv1a_hash(&ip));
     let limit = state.config().rate_limit_read_per_minute;
     let result = check_rate_limit(state.cache(), &key, limit, 60).await;
 
@@ -189,10 +219,16 @@ pub async fn read_rate_limit(
     response
 }
 
-/// Simple hash for rate limit keys (avoids storing raw tokens/IPs).
-fn simple_hash(input: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    input.hash(&mut hasher);
-    hasher.finish()
+/// Deterministic FNV-1a hash for rate limit keys.
+/// Unlike DefaultHasher (SipHash with random seeds), FNV-1a produces identical
+/// hashes across all replicas, ensuring correct per-user/per-IP rate limiting.
+fn fnv1a_hash(input: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
