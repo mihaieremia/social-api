@@ -422,5 +422,292 @@ impl CacheManager {
             .await
             .is_ok()
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spin up a testcontainers Redis and return a connected CacheManager.
+    /// The container must be kept alive for the duration of the test (returned as second element).
+    async fn make_cache() -> (
+        CacheManager,
+        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+    ) {
+        use testcontainers::runners::AsyncRunner;
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = format!("redis://127.0.0.1:{port}");
+        let pool = create_pool(&config).await.unwrap();
+        (CacheManager::new(pool), redis)
+    }
+
+    // -------------------------------------------------------------------------
+    // 1. get / set / del
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_set_del() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:get_set_del";
+
+        // Nothing there yet
+        assert_eq!(cache.get(key).await, None);
+
+        // Set, then retrieve
+        cache.set(key, "hello", 60).await;
+        assert_eq!(cache.get(key).await, Some("hello".to_string()));
+
+        // Delete, then miss
+        cache.del(key).await;
+        assert_eq!(cache.get(key).await, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. get missing key returns None
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_missing_key_returns_none() {
+        let (cache, _redis) = make_cache().await;
+        assert_eq!(cache.get("test:definitely_absent_key").await, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. conditional_incr on missing key → populates from db_count
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conditional_incr_populates_missing_key() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:cond_incr_missing";
+
+        // Key does not exist; script should SET it to db_count=5 and return 5
+        let result = cache.conditional_incr(key, 60, 5).await;
+        assert_eq!(result, Some(5));
+
+        // The key should now be readable
+        assert_eq!(cache.get(key).await, Some("5".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. conditional_incr on existing key → INCR
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conditional_incr_existing_key() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:cond_incr_existing";
+
+        // Pre-populate the key to 10
+        cache.set(key, "10", 60).await;
+
+        // INCR should push it to 11
+        let result = cache.conditional_incr(key, 60, 0).await;
+        assert_eq!(result, Some(11));
+        assert_eq!(cache.get(key).await, Some("11".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. conditional_decr on existing key → DECR
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conditional_decr_existing_key() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:cond_decr_existing";
+
+        cache.set(key, "5", 60).await;
+
+        let result = cache.conditional_decr(key, 60, 0).await;
+        assert_eq!(result, Some(4));
+        assert_eq!(cache.get(key).await, Some("4".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. conditional_decr does not go negative (floor at 0)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conditional_decr_does_not_go_negative() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:cond_decr_floor";
+
+        cache.set(key, "0", 60).await;
+
+        let result = cache.conditional_decr(key, 60, 0).await;
+        assert_eq!(result, Some(0));
+        assert_eq!(cache.get(key).await, Some("0".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. conditional_decr on missing key → populates from db_count
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conditional_decr_populates_missing_key() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:cond_decr_missing";
+
+        let result = cache.conditional_decr(key, 60, 7).await;
+        assert_eq!(result, Some(7));
+        assert_eq!(cache.get(key).await, Some("7".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. mget / mset_ex
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mget_mset_ex() {
+        let (cache, _redis) = make_cache().await;
+
+        let entries: Vec<(&str, &str, u64)> = vec![
+            ("test:mget_k1", "100", 60),
+            ("test:mget_k2", "200", 60),
+        ];
+        cache.mset_ex(&entries).await;
+
+        let keys: Vec<String> = vec![
+            "test:mget_k1".to_string(),
+            "test:mget_k2".to_string(),
+            "test:mget_absent".to_string(),
+        ];
+        let results = cache.mget(&keys).await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], Some("100".to_string()));
+        assert_eq!(results[1], Some("200".to_string()));
+        assert_eq!(results[2], None);
+    }
+
+    // -------------------------------------------------------------------------
+    // 9. mget with empty input returns empty vec
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mget_empty_input_returns_empty() {
+        let (cache, _redis) = make_cache().await;
+        let results = cache.mget(&[]).await;
+        assert!(results.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. set_nx only sets once
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_set_nx_only_sets_once() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:set_nx_lock";
+
+        let first = cache.set_nx(key, "locked", 60).await;
+        assert!(first, "first set_nx should succeed");
+
+        let second = cache.set_nx(key, "locked_again", 60).await;
+        assert!(!second, "second set_nx should fail (key already exists)");
+
+        // Value should still be from the first call
+        assert_eq!(cache.get(key).await, Some("locked".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // 11. replace_sorted_set then zrevrange_with_scores returns descending order
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_zrevrange_with_scores() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:zrev_scores";
+
+        let members = vec![
+            ("post:aaa".to_string(), 10.0_f64),
+            ("post:bbb".to_string(), 50.0_f64),
+            ("post:ccc".to_string(), 30.0_f64),
+        ];
+        cache.replace_sorted_set(key, &members).await;
+
+        let results = cache.zrevrange_with_scores(key, 0, -1).await;
+
+        // Should be in descending score order: bbb(50), ccc(30), aaa(10)
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, "post:bbb");
+        assert!((results[0].1 - 50.0).abs() < f64::EPSILON);
+        assert_eq!(results[1].0, "post:ccc");
+        assert!((results[1].1 - 30.0).abs() < f64::EPSILON);
+        assert_eq!(results[2].0, "post:aaa");
+        assert!((results[2].1 - 10.0).abs() < f64::EPSILON);
+    }
+
+    // -------------------------------------------------------------------------
+    // 12. replace_sorted_set overwrites previous entries
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_replace_sorted_set_overwrites() {
+        let (cache, _redis) = make_cache().await;
+        let key = "test:zrev_overwrite";
+
+        // First population
+        let first = vec![
+            ("old:entry1".to_string(), 100.0_f64),
+            ("old:entry2".to_string(), 200.0_f64),
+        ];
+        cache.replace_sorted_set(key, &first).await;
+
+        // Second population should replace, not merge
+        let second = vec![("new:entry".to_string(), 999.0_f64)];
+        cache.replace_sorted_set(key, &second).await;
+
+        let results = cache.zrevrange_with_scores(key, 0, -1).await;
+        assert_eq!(results.len(), 1, "old entries should be gone after replace");
+        assert_eq!(results[0].0, "new:entry");
+    }
+
+    // -------------------------------------------------------------------------
+    // 13. is_healthy returns true when Redis is reachable
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_is_healthy_returns_true() {
+        let (cache, _redis) = make_cache().await;
+        assert!(cache.is_healthy().await);
+    }
+
+    // -------------------------------------------------------------------------
+    // 14. Redis-unavailable degradation: all methods return safe defaults
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_redis_unavailable_get_returns_none() {
+        // Point at a port that has no Redis; use a very short connection timeout
+        // so the test completes quickly.
+        let manager =
+            bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:19998").unwrap();
+        let pool = bb8::Pool::builder()
+            .max_size(2)
+            .connection_timeout(std::time::Duration::from_millis(50))
+            .build(manager)
+            .await
+            .unwrap();
+        let cache = CacheManager::new(pool);
+
+        // get → None
+        assert_eq!(cache.get("any_key").await, None);
+
+        // conditional_incr → None
+        assert_eq!(cache.conditional_incr("any_key", 60, 5).await, None);
+
+        // set_nx → false
+        assert!(!cache.set_nx("any_key", "v", 60).await);
+
+        // mget → vec of None
+        let keys = vec!["k1".to_string(), "k2".to_string()];
+        let results = cache.mget(&keys).await;
+        assert_eq!(results, vec![None, None]);
+    }
 }
