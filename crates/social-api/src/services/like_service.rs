@@ -107,6 +107,11 @@ impl LikeService {
             });
             let channel = format!("sse:{content_type}:{content_id}");
             self.cache.publish(&channel, &event.to_string()).await;
+            metrics::counter!(
+                "social_api_likes_total",
+                "content_type" => content_type.to_string(),
+                "operation" => "like",
+            ).increment(1);
         }
 
         Ok(LikeActionResponse {
@@ -153,6 +158,11 @@ impl LikeService {
             });
             let channel = format!("sse:{content_type}:{content_id}");
             self.cache.publish(&channel, &event.to_string()).await;
+            metrics::counter!(
+                "social_api_likes_total",
+                "content_type" => content_type.to_string(),
+                "operation" => "unlike",
+            ).increment(1);
         }
 
         Ok(LikeActionResponse {
