@@ -46,6 +46,7 @@ pub struct Config {
 
     // SSE
     pub sse_heartbeat_interval_secs: u64,
+    pub sse_broadcast_capacity: usize,
 
     // Leaderboard
     pub leaderboard_refresh_interval_secs: u64,
@@ -119,6 +120,7 @@ impl Config {
             ),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
+            sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 256),
             leaderboard_refresh_interval_secs: env_or_default(
                 "LEADERBOARD_REFRESH_INTERVAL_SECS",
                 60,
@@ -135,6 +137,49 @@ impl Config {
     /// Get the API URL for a content type.
     pub fn content_api_url(&self, content_type: &str) -> Option<&str> {
         self.content_api_urls.get(content_type).map(|s| s.as_str())
+    }
+
+    /// Minimal config for unit tests — does NOT read environment variables.
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        let mut content_api_urls = std::collections::HashMap::new();
+        content_api_urls.insert("post".to_string(), "http://localhost:8081".to_string());
+        content_api_urls.insert(
+            "bonus_hunter".to_string(),
+            "http://localhost:8081".to_string(),
+        );
+        content_api_urls.insert(
+            "top_picks".to_string(),
+            "http://localhost:8081".to_string(),
+        );
+
+        Self {
+            http_port: 8080,
+            database_url: "postgres://social:social_password@localhost:5432/social_api_test"
+                .to_string(),
+            read_database_url:
+                "postgres://social:social_password@localhost:5432/social_api_test".to_string(),
+            redis_url: "redis://localhost:6379".to_string(),
+            content_api_urls,
+            profile_api_url: "http://localhost:8081".to_string(),
+            db_max_connections: 5,
+            db_min_connections: 1,
+            db_acquire_timeout_secs: 5,
+            redis_pool_size: 5,
+            rate_limit_write_per_minute: 30,
+            rate_limit_read_per_minute: 1000,
+            cache_ttl_like_counts_secs: 300,
+            cache_ttl_content_validation_secs: 3600,
+            cache_ttl_user_status_secs: 60,
+            circuit_breaker_failure_threshold: 5,
+            circuit_breaker_recovery_timeout_secs: 30,
+            circuit_breaker_success_threshold: 2,
+            leaderboard_refresh_interval_secs: 300,
+            shutdown_timeout_secs: 30,
+            sse_heartbeat_interval_secs: 15,
+            sse_broadcast_capacity: 128,
+            log_level: "info".to_string(),
+        }
     }
 }
 
