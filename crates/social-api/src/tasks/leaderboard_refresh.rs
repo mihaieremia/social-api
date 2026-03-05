@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use futures::future::join_all;
 use shared::types::TimeWindow;
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +48,19 @@ pub fn spawn_leaderboard_refresh(
                     tracing::info!("Leaderboard refresh task stopping (shutdown)");
                     break;
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
+                _ = tokio::time::sleep({
+                    // Add ±10% jitter so replicas don't all fire simultaneously.
+                    let jitter_factor = {
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos();
+                        let percent = (nanos % 201) as i64 - 100; // -100..+100
+                        percent as f64 / 1000.0 // -0.1..+0.1
+                    };
+                    let sleep_secs = (interval_secs as f64 * (1.0 + jitter_factor)).max(1.0) as u64;
+                    std::time::Duration::from_secs(sleep_secs)
+                }) => {
                     if let Err(e) = refresh_all_windows(&db, &cache).await {
                         tracing::error!(error = %e, "Leaderboard refresh cycle failed");
                     }
@@ -57,19 +70,20 @@ pub fn spawn_leaderboard_refresh(
     })
 }
 
-/// Run one full refresh cycle across every time window.
+/// Run one full refresh cycle across every time window — all windows in parallel.
 async fn refresh_all_windows(
     db: &DbPools,
     cache: &CacheManager,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for window in WINDOWS {
-        if let Err(e) = refresh_window(db, cache, window).await {
-            tracing::warn!(
-                window = window.as_str(),
-                error = %e,
-                "Failed to refresh leaderboard window"
-            );
-            // Continue with remaining windows -- don't abort the whole cycle.
+    let futures: Vec<_> = WINDOWS
+        .iter()
+        .map(|&window| refresh_window(db, cache, window))
+        .collect();
+
+    let results = join_all(futures).await;
+    for result in results {
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "Failed to refresh leaderboard window");
         }
     }
     Ok(())
