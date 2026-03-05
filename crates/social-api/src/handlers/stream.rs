@@ -43,7 +43,7 @@ pub async fn like_stream(
     Query(params): Query<StreamParams>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
     // Validate content_type against registered types
-    if !state.config().content_api_urls.contains_key(&params.content_type) {
+    if !state.config().is_valid_content_type(&params.content_type) {
         return Err(AppError::ContentTypeUnknown(params.content_type.clone()).into());
     }
 
