@@ -3,11 +3,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Like record from the database.
+/// Note: `user_id` is intentionally not included — callers always know the
+/// user_id already (they pass it in). This avoids selecting an unused column.
 #[derive(Debug, sqlx::FromRow)]
 pub struct LikeRow {
     pub id: i64,
-    #[allow(dead_code)]
-    pub user_id: Uuid,
     pub content_type: String,
     pub content_id: Uuid,
     pub created_at: DateTime<Utc>,
@@ -29,7 +29,7 @@ pub async fn insert_like(
         INSERT INTO likes (user_id, content_type, content_id)
         VALUES ($1, $2, $3)
         ON CONFLICT (user_id, content_type, content_id) DO NOTHING
-        RETURNING id, user_id, content_type, content_id, created_at
+        RETURNING id, content_type, content_id, created_at
         "#,
     )
     .bind(user_id)
@@ -62,7 +62,7 @@ pub async fn insert_like(
             tx.commit().await?;
             let existing = sqlx::query_as::<_, LikeRow>(
                 r#"
-                SELECT id, user_id, content_type, content_id, created_at
+                SELECT id, content_type, content_id, created_at
                 FROM likes
                 WHERE user_id = $1 AND content_type = $2 AND content_id = $3
                 "#,
@@ -180,7 +180,7 @@ pub async fn get_user_likes(
         (Some(ts), Some(id), Some(ct)) => {
             sqlx::query_as::<_, LikeRow>(
                 r#"
-                SELECT id, user_id, content_type, content_id, created_at
+                SELECT id, content_type, content_id, created_at
                 FROM likes
                 WHERE user_id = $1 AND content_type = $2
                   AND (created_at, id) < ($3, $4)
@@ -199,7 +199,7 @@ pub async fn get_user_likes(
         (Some(ts), Some(id), None) => {
             sqlx::query_as::<_, LikeRow>(
                 r#"
-                SELECT id, user_id, content_type, content_id, created_at
+                SELECT id, content_type, content_id, created_at
                 FROM likes
                 WHERE user_id = $1
                   AND (created_at, id) < ($2, $3)
@@ -217,7 +217,7 @@ pub async fn get_user_likes(
         (_, _, Some(ct)) => {
             sqlx::query_as::<_, LikeRow>(
                 r#"
-                SELECT id, user_id, content_type, content_id, created_at
+                SELECT id, content_type, content_id, created_at
                 FROM likes
                 WHERE user_id = $1 AND content_type = $2
                 ORDER BY created_at DESC, id DESC
@@ -233,7 +233,7 @@ pub async fn get_user_likes(
         _ => {
             sqlx::query_as::<_, LikeRow>(
                 r#"
-                SELECT id, user_id, content_type, content_id, created_at
+                SELECT id, content_type, content_id, created_at
                 FROM likes
                 WHERE user_id = $1
                 ORDER BY created_at DESC, id DESC

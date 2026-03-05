@@ -41,16 +41,15 @@ impl LikeService {
     }
 
     /// Like content. Idempotent — duplicate requests return success.
+    ///
+    /// **Pre-condition:** `content_type` must be validated by the caller (handler/extractor).
     pub async fn like(
         &self,
         user_id: Uuid,
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        // Validate content type
-        self.validate_content_type(content_type)?;
-
-        // Validate content exists
+        // Validate content exists via external Content API
         self.validate_content(content_type, content_id).await?;
 
         // Insert like (idempotent)
@@ -101,14 +100,14 @@ impl LikeService {
     }
 
     /// Unlike content. Idempotent — unliking content not liked returns success.
+    ///
+    /// **Pre-condition:** `content_type` must be validated by the caller (handler/extractor).
     pub async fn unlike(
         &self,
         user_id: Uuid,
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        self.validate_content_type(content_type)?;
-
         let was_liked =
             like_repository::delete_like(&self.db.writer, user_id, content_type, content_id)
                 .await
@@ -155,13 +154,13 @@ impl LikeService {
     }
 
     /// Get like count with cache-first strategy and stampede protection.
+    ///
+    /// **Pre-condition:** `content_type` must be validated by the caller (handler/extractor).
     pub async fn get_count(
         &self,
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeCountResponse, AppError> {
-        self.validate_content_type(content_type)?;
-
         let count = self.get_count_inner(content_type, content_id).await?;
 
         Ok(LikeCountResponse {
@@ -222,14 +221,14 @@ impl LikeService {
     }
 
     /// Get like status for a user on a content item.
+    ///
+    /// **Pre-condition:** `content_type` must be validated by the caller (handler/extractor).
     pub async fn get_status(
         &self,
         user_id: Uuid,
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeStatusResponse, AppError> {
-        self.validate_content_type(content_type)?;
-
         let liked_at =
             like_repository::get_like_status(&self.db.reader, user_id, content_type, content_id)
                 .await
@@ -480,13 +479,9 @@ impl LikeService {
         })
     }
 
-    fn validate_content_type(&self, content_type: &str) -> Result<(), AppError> {
-        if !self.config.is_valid_content_type(content_type) {
-            return Err(AppError::ContentTypeUnknown(content_type.to_string()));
-        }
-        Ok(())
-    }
-
+    /// Validate content exists via external Content API (with circuit breaker).
+    ///
+    /// **Pre-condition:** `content_type` is already validated by the caller.
     async fn validate_content(&self, content_type: &str, content_id: Uuid) -> Result<(), AppError> {
         // Check circuit breaker before making external call
         if !self.content_breaker.allow_request() {

@@ -8,9 +8,13 @@ use axum::{
 use futures::StreamExt;
 use futures::stream::Stream;
 use serde::Deserialize;
+use shared::errors::AppError;
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::errors::ApiErrorResponse;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -30,28 +34,33 @@ pub struct StreamParams {
     ),
     responses(
         (status = 200, description = "SSE stream opened. Events: like, unlike, heartbeat, shutdown", content_type = "text/event-stream"),
+        (status = 400, description = "Invalid content_id (not a UUID) or unknown content_type"),
     ),
     tag = "Stream"
 )]
 pub async fn like_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    // Validate content_type against registered types
+    if !state.config().content_api_urls.contains_key(&params.content_type) {
+        return Err(AppError::ContentTypeUnknown(params.content_type.clone()).into());
+    }
+
+    // Validate content_id is a valid UUID
+    let _content_id: Uuid = params.content_id.parse().map_err(|_| {
+        ApiErrorResponse::from(AppError::InvalidContentId(params.content_id.clone()))
+    })?;
+
     let channel = format!("sse:{}:{}", params.content_type, params.content_id);
     let heartbeat_secs = state.config().sse_heartbeat_interval_secs;
     let redis_url = state.config().redis_url.clone();
     let shutdown_token = state.shutdown_token().clone();
 
-    // Track active SSE connection
-    metrics::gauge!("social_api_sse_connections_active").increment(1.0);
-
     let stream = create_sse_stream(redis_url, channel, heartbeat_secs, shutdown_token);
 
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(heartbeat_secs))
-            .text("heartbeat"),
-    )
+    // No KeepAlive — our select! loop sends spec-compliant JSON heartbeats.
+    Ok(Sse::new(stream))
 }
 
 /// Creates an SSE stream that subscribes to a Redis Pub/Sub channel.
@@ -64,7 +73,9 @@ fn create_sse_stream(
     shutdown_token: CancellationToken,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-        // Decrement active connection gauge on any exit path
+        // Track active SSE connection inside the stream to avoid gauge
+        // leaks if the client disconnects before the stream is polled.
+        metrics::gauge!("social_api_sse_connections_active").increment(1.0);
         struct SseGuard;
         impl Drop for SseGuard {
             fn drop(&mut self) {

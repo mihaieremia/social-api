@@ -13,6 +13,16 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::content_path::ContentPath;
 use crate::state::AppState;
 
+/// Validate that a content_type string is registered in the config.
+/// Used by handlers that receive content_type outside of path params
+/// (JSON body, query params) where ContentPath extractor doesn't apply.
+fn validate_content_type(state: &AppState, content_type: &str) -> Result<(), AppError> {
+    if !state.config().is_valid_content_type(content_type) {
+        return Err(AppError::ContentTypeUnknown(content_type.to_string()));
+    }
+    Ok(())
+}
+
 /// POST /v1/likes — Like content
 #[utoipa::path(
     post,
@@ -34,6 +44,8 @@ pub async fn like_content(
     AuthUser(user): AuthUser,
     Json(body): Json<LikeRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
+    validate_content_type(&state, &body.content_type)?;
+
     let response = state
         .like_service()
         .like(user.user_id, &body.content_type, body.content_id)
@@ -145,7 +157,12 @@ pub async fn get_user_likes(
     AuthUser(user): AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    let limit = params.limit.unwrap_or(20);
+    // Validate optional content_type filter
+    if let Some(ref ct) = params.content_type {
+        validate_content_type(&state, ct)?;
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let response = state
         .like_service()
         .get_user_likes(
@@ -173,6 +190,11 @@ pub async fn batch_counts(
     State(state): State<AppState>,
     Json(body): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
+    // Validate all content_types in the batch up-front
+    for item in &body.items {
+        validate_content_type(&state, &item.content_type)?;
+    }
+
     let items: Vec<(String, Uuid)> = body
         .items
         .into_iter()
@@ -203,6 +225,11 @@ pub async fn batch_statuses(
     AuthUser(user): AuthUser,
     Json(body): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
+    // Validate all content_types in the batch up-front
+    for item in &body.items {
+        validate_content_type(&state, &item.content_type)?;
+    }
+
     let items: Vec<(String, Uuid)> = body
         .items
         .into_iter()
@@ -247,10 +274,15 @@ pub async fn get_leaderboard(
     State(state): State<AppState>,
     Query(params): Query<LeaderboardParams>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
+    // Validate optional content_type filter
+    if let Some(ref ct) = params.content_type {
+        validate_content_type(&state, ct)?;
+    }
+
     let window_str = params.window.as_deref().unwrap_or("all");
     let window = TimeWindow::from_str_value(window_str)
         .ok_or_else(|| AppError::InvalidWindow(window_str.to_string()))?;
-    let limit = params.limit.unwrap_or(10);
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
     let response = state
         .like_service()
         .get_leaderboard(params.content_type.as_deref(), window, limit)

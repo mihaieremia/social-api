@@ -26,7 +26,6 @@ struct AppStateInner {
     like_service: LikeService,
     token_validator: HttpTokenValidator,
     profile_breaker: Arc<CircuitBreaker>,
-    content_breaker: Arc<CircuitBreaker>,
     shutdown_token: CancellationToken,
     inflight_count: AtomicUsize,
 }
@@ -78,7 +77,6 @@ impl AppState {
                 like_service,
                 token_validator,
                 profile_breaker,
-                content_breaker,
                 shutdown_token,
                 inflight_count: AtomicUsize::new(0),
             }),
@@ -111,11 +109,6 @@ impl AppState {
 
     pub fn profile_breaker(&self) -> &CircuitBreaker {
         &self.inner.profile_breaker
-    }
-
-    #[allow(dead_code)]
-    pub fn content_breaker(&self) -> &CircuitBreaker {
-        &self.inner.content_breaker
     }
 
     pub fn shutdown_token(&self) -> &CancellationToken {
