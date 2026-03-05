@@ -52,6 +52,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
 async-stream = "0.3"
+dashmap = "6"
 tokio-stream = "0.1"
 futures = "0.3"
 
@@ -59,3 +60,9 @@ futures = "0.3"
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+
+[dev-dependencies]
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+# sqlx re-declared to satisfy Cargo; no extra features needed beyond what [dependencies] already enables
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
