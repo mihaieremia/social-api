@@ -30,10 +30,8 @@ pub struct Config {
     // Cache TTLs
     pub cache_ttl_like_counts_secs: u64,
     pub cache_ttl_content_validation_secs: u64,
-    /// Spec env var `CACHE_TTL_USER_STATUS_SECS`. Currently unused because
-    /// user-status caching was evaluated and deferred (spec: "evaluate whether
-    /// this is worth caching"). Kept for forward-compatibility.
-    #[allow(dead_code)]
+    /// Token validation cache TTL. Used by HttpTokenValidator to cache
+    /// authenticated user data in Redis, reducing Profile API round-trips.
     pub cache_ttl_user_status_secs: u64,
 
     // Circuit breaker

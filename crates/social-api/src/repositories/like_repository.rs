@@ -249,6 +249,9 @@ pub async fn get_user_likes(
 }
 
 /// Batch get like counts from the like_counts table.
+/// Currently unused — batch_counts routes through get_count_inner for stampede coalescing.
+/// Retained for potential direct-batch use cases (e.g., leaderboard refresh).
+#[allow(dead_code)]
 pub async fn batch_get_counts(
     pool: &PgPool,
     items: &[(String, Uuid)],

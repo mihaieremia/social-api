@@ -88,7 +88,7 @@ impl AppState {
                 like_service,
                 token_validator,
                 profile_breaker,
-                content_breaker: content_breaker.clone(),
+                content_breaker,
                 shutdown_token,
                 inflight_count: AtomicUsize::new(0),
             }),
