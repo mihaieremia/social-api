@@ -399,7 +399,7 @@ mod tests {
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
 
-        let inner = cb.inner.lock().unwrap();
+        let inner = cb.inner.lock().unwrap_or_else(|e| e.into_inner());
         assert!(inner.call_window.is_empty());
     }
 
