@@ -64,8 +64,12 @@ impl AppState {
             min_calls_for_rate: 10,
         }));
 
-        let token_validator =
-            HttpTokenValidator::new(http_client.clone(), config.profile_api_url.clone());
+        let token_validator = HttpTokenValidator::new(
+            http_client.clone(),
+            config.profile_api_url.clone(),
+            cache.clone(),
+            config.cache_ttl_user_status_secs,
+        );
 
         let like_service = LikeService::new(
             db.clone(),
