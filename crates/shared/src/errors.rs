@@ -216,9 +216,9 @@ impl AppError {
                 None,
             ),
             Self::Internal(msg) => (ErrorCode::InternalError, msg.clone(), None),
-            Self::Database(msg) => (
+            Self::Database(_) => (
                 ErrorCode::InternalError,
-                format!("Database error: {msg}"),
+                "An internal error occurred. Please try again later.".to_string(),
                 None,
             ),
             Self::Cache(_) => (ErrorCode::InternalError, "Cache error".to_string(), None),
@@ -324,5 +324,16 @@ mod tests {
             AppError::Cache("timeout".into()).error_code(),
             ErrorCode::InternalError
         );
+    }
+
+    #[test]
+    fn test_database_error_does_not_leak_internals() {
+        let err = AppError::Database(
+            "duplicate key value violates unique constraint \"uq_likes_user_content\"".into(),
+        );
+        let api_err = err.to_api_error("req_x");
+        assert!(!api_err.error.message.contains("uq_likes_user_content"));
+        assert!(!api_err.error.message.contains("duplicate key"));
+        assert_eq!(api_err.error.code, ErrorCode::InternalError);
     }
 }
