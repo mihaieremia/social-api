@@ -11,8 +11,13 @@ const BASE_URL: &str = "http://localhost:8080";
 const MOCK_URL: &str = "http://localhost:8081";
 const TOKEN_USER_1: &str = "tok_user_1";
 const TOKEN_USER_2: &str = "tok_user_2";
+const TOKEN_USER_3: &str = "tok_user_3";
+const TOKEN_USER_4: &str = "tok_user_4";
 const VALID_POST_ID: &str = "731b0395-4888-4822-b516-05b4b7bf2089";
 const VALID_POST_ID_2: &str = "9601c044-6130-4ee5-a155-96570e05a02f";
+// Dedicated IDs for pagination test (bonus_hunter type to avoid conflicts)
+const PAGINATION_CONTENT_1: &str = "c3d4e5f6-a7b8-9012-cdef-123456789012";
+const PAGINATION_CONTENT_2: &str = "d4e5f6a7-b8c9-0123-def0-234567890123";
 
 fn client() -> Client {
     Client::new()
@@ -157,10 +162,22 @@ async fn test_like_idempotency() {
 async fn test_unlike_idempotency() {
     let c = client();
 
-    // Unlike something never liked
+    // Use a dedicated user + content that no other test touches
+    // First ensure clean state by unliking
+    let _ = c
+        .delete(format!(
+            "{BASE_URL}/v1/likes/top_picks/b8c9d0e1-f2a3-4567-1234-678901234567"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_4))
+        .send()
+        .await;
+
+    // Unlike something never liked (or just cleaned up)
     let resp = c
-        .delete(format!("{BASE_URL}/v1/likes/post/{VALID_POST_ID_2}"))
-        .header("Authorization", auth_header(TOKEN_USER_1))
+        .delete(format!(
+            "{BASE_URL}/v1/likes/top_picks/b8c9d0e1-f2a3-4567-1234-678901234567"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_4))
         .send()
         .await
         .unwrap();
@@ -311,13 +328,13 @@ async fn test_batch_too_large() {
 async fn test_user_likes_pagination() {
     let c = client();
 
-    // Like several items
-    for id in [VALID_POST_ID, VALID_POST_ID_2] {
+    // Use dedicated user + content type to avoid conflicts with parallel tests
+    for id in [PAGINATION_CONTENT_1, PAGINATION_CONTENT_2] {
         let _ = c
             .post(format!("{BASE_URL}/v1/likes"))
-            .header("Authorization", auth_header(TOKEN_USER_1))
+            .header("Authorization", auth_header(TOKEN_USER_3))
             .json(&json!({
-                "content_type": "post",
+                "content_type": "bonus_hunter",
                 "content_id": id
             }))
             .send()
@@ -327,7 +344,7 @@ async fn test_user_likes_pagination() {
     // Get first page with limit=1
     let resp = c
         .get(format!("{BASE_URL}/v1/likes/user?limit=1"))
-        .header("Authorization", auth_header(TOKEN_USER_1))
+        .header("Authorization", auth_header(TOKEN_USER_3))
         .send()
         .await
         .unwrap();
@@ -338,10 +355,10 @@ async fn test_user_likes_pagination() {
     assert!(body["next_cursor"].is_string());
 
     // Cleanup
-    for id in [VALID_POST_ID, VALID_POST_ID_2] {
+    for id in [PAGINATION_CONTENT_1, PAGINATION_CONTENT_2] {
         let _ = c
-            .delete(format!("{BASE_URL}/v1/likes/post/{id}"))
-            .header("Authorization", auth_header(TOKEN_USER_1))
+            .delete(format!("{BASE_URL}/v1/likes/bonus_hunter/{id}"))
+            .header("Authorization", auth_header(TOKEN_USER_3))
             .send()
             .await;
     }
