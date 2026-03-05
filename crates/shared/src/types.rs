@@ -1,1 +1,231 @@
-// Placeholder - will be populated in Task 2
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use uuid::Uuid;
+
+/// Authenticated user identity extracted from token validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthenticatedUser {
+    pub user_id: Uuid,
+    pub display_name: String,
+}
+
+/// Reference to a specific content item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ContentRef {
+    pub content_type: String,
+    pub content_id: Uuid,
+}
+
+impl fmt::Display for ContentRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.content_type, self.content_id)
+    }
+}
+
+/// Time window for leaderboard queries.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TimeWindow {
+    #[serde(rename = "24h")]
+    Day,
+    #[serde(rename = "7d")]
+    Week,
+    #[serde(rename = "30d")]
+    Month,
+    #[serde(rename = "all")]
+    All,
+}
+
+impl TimeWindow {
+    /// Parse from string representation.
+    pub fn from_str_value(s: &str) -> Option<Self> {
+        match s {
+            "24h" => Some(Self::Day),
+            "7d" => Some(Self::Week),
+            "30d" => Some(Self::Month),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    /// Returns the duration in seconds for this window, None for All.
+    pub fn duration_secs(&self) -> Option<i64> {
+        match self {
+            Self::Day => Some(86_400),
+            Self::Week => Some(604_800),
+            Self::Month => Some(2_592_000),
+            Self::All => None,
+        }
+    }
+
+    /// Returns the string representation used in Redis keys and API responses.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Month => "30d",
+            Self::All => "all",
+        }
+    }
+}
+
+impl fmt::Display for TimeWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A like record as stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Like {
+    pub id: i64,
+    pub user_id: Uuid,
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// SSE event types for the like stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum LikeEvent {
+    #[serde(rename = "like")]
+    Liked {
+        user_id: Uuid,
+        count: i64,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "unlike")]
+    Unliked {
+        user_id: Uuid,
+        count: i64,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "heartbeat")]
+    Heartbeat { timestamp: DateTime<Utc> },
+    #[serde(rename = "shutdown")]
+    Shutdown { timestamp: DateTime<Utc> },
+}
+
+/// Pagination parameters for cursor-based pagination.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaginationParams {
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+    pub content_type: Option<String>,
+}
+
+/// Paginated response wrapper.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaginatedResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// A user's liked item in list responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLikeItem {
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub liked_at: DateTime<Utc>,
+}
+
+/// Like count response.
+#[derive(Debug, Clone, Serialize)]
+pub struct LikeCountResponse {
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub count: i64,
+}
+
+/// Like status response.
+#[derive(Debug, Clone, Serialize)]
+pub struct LikeStatusResponse {
+    pub liked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_at: Option<DateTime<Utc>>,
+}
+
+/// Like action response (after like/unlike).
+#[derive(Debug, Clone, Serialize)]
+pub struct LikeActionResponse {
+    pub liked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub already_existed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub was_liked: Option<bool>,
+    pub count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_at: Option<DateTime<Utc>>,
+}
+
+/// Batch request item.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchItem {
+    pub content_type: String,
+    pub content_id: Uuid,
+}
+
+/// Batch request body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchRequest {
+    pub items: Vec<BatchItem>,
+}
+
+/// Batch count result.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchCountResult {
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub count: i64,
+}
+
+/// Batch status result.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchStatusResult {
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub liked: bool,
+    pub liked_at: Option<DateTime<Utc>>,
+}
+
+/// Top liked content item.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopLikedItem {
+    pub content_type: String,
+    pub content_id: Uuid,
+    pub count: i64,
+}
+
+/// Top liked response.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopLikedResponse {
+    pub window: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    pub items: Vec<TopLikedItem>,
+}
+
+/// Like request body (POST /v1/likes).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LikeRequest {
+    pub content_type: String,
+    pub content_id: Uuid,
+}
+
+/// Health check detail.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthDetail {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Health check response.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<std::collections::HashMap<String, HealthDetail>>,
+}
