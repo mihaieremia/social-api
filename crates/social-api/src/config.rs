@@ -40,6 +40,10 @@ pub struct Config {
     pub circuit_breaker_failure_threshold: u32,
     pub circuit_breaker_recovery_timeout_secs: u64,
     pub circuit_breaker_success_threshold: u32,
+    /// Sliding window duration for circuit breaker failure-rate calculation.
+    /// Separate from recovery_timeout to allow independent tuning.
+    /// Default: 30s (spec recommendation).
+    pub circuit_breaker_rate_window_secs: u64,
 
     // Shutdown
     pub shutdown_timeout_secs: u64,
@@ -118,6 +122,7 @@ impl Config {
                 "CIRCUIT_BREAKER_SUCCESS_THRESHOLD",
                 3,
             ),
+            circuit_breaker_rate_window_secs: env_or_default("CIRCUIT_BREAKER_RATE_WINDOW_SECS", 30),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
             sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 256),
@@ -174,6 +179,7 @@ impl Config {
             circuit_breaker_failure_threshold: 5,
             circuit_breaker_recovery_timeout_secs: 30,
             circuit_breaker_success_threshold: 2,
+            circuit_breaker_rate_window_secs: 30,
             leaderboard_refresh_interval_secs: 300,
             shutdown_timeout_secs: 30,
             sse_heartbeat_interval_secs: 15,
