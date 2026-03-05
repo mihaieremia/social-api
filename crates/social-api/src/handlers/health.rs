@@ -45,10 +45,17 @@ pub async fn liveness() -> impl IntoResponse {
 )]
 pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
     let mut details = HashMap::new();
-    let mut all_healthy = true;
 
-    // Check database
-    let db_healthy = state.db().is_healthy().await;
+    // Run all dependency checks in parallel so worst-case latency is
+    // max(individual timeout) rather than sum of all timeouts.
+    let (db_healthy, redis_healthy, content_healthy) = tokio::join!(
+        state.db().is_healthy(),
+        state.cache().is_healthy(),
+        check_any_content_api(&state),
+    );
+
+    let all_healthy = db_healthy && redis_healthy && content_healthy;
+
     details.insert(
         "database".to_string(),
         HealthDetail {
@@ -60,12 +67,7 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
             },
         },
     );
-    if !db_healthy {
-        all_healthy = false;
-    }
 
-    // Check Redis
-    let redis_healthy = state.cache().is_healthy().await;
     details.insert(
         "redis".to_string(),
         HealthDetail {
@@ -77,12 +79,7 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
             },
         },
     );
-    if !redis_healthy {
-        all_healthy = false;
-    }
 
-    // Check at least one content API is reachable
-    let content_healthy = check_any_content_api(&state).await;
     details.insert(
         "content_api".to_string(),
         HealthDetail {
@@ -94,9 +91,6 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
             },
         },
     );
-    if !content_healthy {
-        all_healthy = false;
-    }
 
     let status_code = if all_healthy {
         StatusCode::OK
