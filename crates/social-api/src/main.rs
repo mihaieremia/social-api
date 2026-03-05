@@ -1,7 +1,9 @@
+mod cache;
 mod config;
+mod db;
 mod logging;
 
 fn main() {
-    // Logging will be initialized properly when we have the full server (Task 7)
+    // Full server wiring in Task 7
     println!("Social API - starting...");
 }
