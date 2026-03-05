@@ -50,6 +50,26 @@ impl LikeService {
         }
     }
 
+    /// Test constructor — accepts a pre-built ContentValidator trait object.
+    /// Production code uses `new()` which builds `HttpContentValidator`.
+    #[cfg(test)]
+    pub fn new_with_validator(
+        db: DbPools,
+        cache: CacheManager,
+        content_validator: Arc<dyn ContentValidator>,
+        config: Config,
+        content_breaker: Arc<CircuitBreaker>,
+    ) -> Self {
+        Self {
+            db,
+            cache,
+            content_validator,
+            config,
+            content_breaker,
+            pending_fetches: DashMap::new(),
+        }
+    }
+
     /// Like content. Idempotent — duplicate requests return success.
     ///
     /// **Pre-condition:** `content_type` must be validated by the caller (handler/extractor).

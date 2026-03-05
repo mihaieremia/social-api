@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cache::manager::CacheManager;
 use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use crate::clients::profile_client::HttpTokenValidator;
+use crate::clients::profile_client::{HttpTokenValidator, TokenValidator};
 use crate::config::Config;
 use crate::db::DbPools;
 use crate::services::like_service::LikeService;
@@ -24,7 +24,7 @@ struct AppStateInner {
     config: Config,
     http_client: reqwest::Client,
     like_service: LikeService,
-    token_validator: HttpTokenValidator,
+    token_validator: Box<dyn TokenValidator>,
     profile_breaker: Arc<CircuitBreaker>,
     shutdown_token: CancellationToken,
     inflight_count: AtomicUsize,
@@ -63,8 +63,8 @@ impl AppState {
             min_calls_for_rate: 10,
         }));
 
-        let token_validator =
-            HttpTokenValidator::new(http_client.clone(), config.profile_api_url.clone());
+        let token_validator: Box<dyn TokenValidator> =
+            Box::new(HttpTokenValidator::new(http_client.clone(), config.profile_api_url.clone()));
 
         let like_service = LikeService::new(
             db.clone(),
@@ -109,8 +109,8 @@ impl AppState {
         &self.inner.like_service
     }
 
-    pub fn token_validator(&self) -> &HttpTokenValidator {
-        &self.inner.token_validator
+    pub fn token_validator(&self) -> &dyn TokenValidator {
+        &*self.inner.token_validator
     }
 
     pub fn profile_breaker(&self) -> &CircuitBreaker {
@@ -131,5 +131,39 @@ impl AppState {
 
     pub fn inflight_count(&self) -> usize {
         self.inner.inflight_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(
+        db: DbPools,
+        cache: CacheManager,
+        config: Config,
+        shutdown_token: CancellationToken,
+        token_validator: Box<dyn TokenValidator>,
+        like_service: LikeService,
+    ) -> Self {
+        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: config.circuit_breaker_failure_threshold,
+            recovery_timeout: std::time::Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            success_threshold: config.circuit_breaker_success_threshold,
+            service_name: "profile_api".to_string(),
+            rate_window: std::time::Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
+        }));
+        let http_client = reqwest::Client::new();
+        Self {
+            inner: Arc::new(AppStateInner {
+                db,
+                cache,
+                config,
+                http_client,
+                like_service,
+                token_validator,
+                profile_breaker,
+                shutdown_token,
+                inflight_count: AtomicUsize::new(0),
+            }),
+        }
     }
 }
