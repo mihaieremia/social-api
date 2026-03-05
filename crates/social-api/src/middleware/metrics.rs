@@ -3,8 +3,8 @@ use std::time::Instant;
 
 /// Middleware that records HTTP request metrics.
 pub async fn track_metrics(request: Request, next: Next) -> Response {
-    let method = request.method().to_string();
-    let path = request.uri().path().to_string();
+    let method = request.method().as_str().to_owned();
+    let path = normalize_path(request.uri().path());
     let start = Instant::now();
 
     let response = next.run(request).await;
@@ -12,20 +12,18 @@ pub async fn track_metrics(request: Request, next: Next) -> Response {
     let status = response.status().as_u16().to_string();
     let latency = start.elapsed().as_secs_f64();
 
-    // Record counter
     metrics::counter!(
         "social_api_http_requests_total",
         "method" => method.clone(),
-        "path" => normalize_path(&path),
+        "path" => path.clone(),
         "status" => status,
     )
     .increment(1);
 
-    // Record histogram
     metrics::histogram!(
         "social_api_http_request_duration_seconds",
         "method" => method,
-        "path" => normalize_path(&path),
+        "path" => path,
     )
     .record(latency);
 
@@ -35,18 +33,18 @@ pub async fn track_metrics(request: Request, next: Next) -> Response {
 /// Normalize path to avoid high-cardinality labels.
 /// Replaces UUIDs and numeric IDs with placeholders.
 fn normalize_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').collect();
-    let normalized: Vec<String> = parts
-        .iter()
-        .map(|part| {
-            if uuid::Uuid::parse_str(part).is_ok() || part.parse::<i64>().is_ok() {
-                ":id".to_string()
-            } else {
-                part.to_string()
-            }
-        })
-        .collect();
-    normalized.join("/")
+    let mut result = String::with_capacity(path.len());
+    for (i, part) in path.split('/').enumerate() {
+        if i > 0 {
+            result.push('/');
+        }
+        if uuid::Uuid::parse_str(part).is_ok() || part.parse::<i64>().is_ok() {
+            result.push_str(":id");
+        } else {
+            result.push_str(part);
+        }
+    }
+    result
 }
 
 /// Initialize Prometheus recorder and return the handle.

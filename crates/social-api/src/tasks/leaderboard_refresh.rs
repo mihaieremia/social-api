@@ -93,14 +93,10 @@ async fn refresh_window(
     let key = format!("lb:{}", window.as_str());
 
     // Build member/score pairs for ZADD.
-    let members: Vec<(String, f64)> = rows
-        .iter()
-        .map(|(ct, cid, count)| {
-            let member = format!("{ct}:{cid}");
-            (*count as f64, member)
-        })
-        .map(|(score, member)| (member, score))
-        .collect();
+    let mut members = Vec::with_capacity(rows.len());
+    for (ct, cid, count) in &rows {
+        members.push((format!("{ct}:{cid}"), *count as f64));
+    }
 
     // Atomically replace the sorted set: DEL + ZADD in a pipeline.
     cache.replace_sorted_set(&key, &members).await;

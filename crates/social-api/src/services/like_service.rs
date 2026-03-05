@@ -272,15 +272,15 @@ impl LikeService {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         let has_more = rows.len() as i64 > limit;
-        let items: Vec<UserLikeItem> = rows
-            .iter()
-            .take(limit as usize)
-            .map(|r| UserLikeItem {
+        let take_n = (limit as usize).min(rows.len());
+        let mut items = Vec::with_capacity(take_n);
+        for r in rows.iter().take(take_n) {
+            items.push(UserLikeItem {
                 content_type: r.content_type.clone(),
                 content_id: r.content_id,
                 liked_at: r.created_at,
-            })
-            .collect();
+            });
+        }
 
         let next_cursor = if has_more {
             items.last().map(|last| {
@@ -311,15 +311,15 @@ impl LikeService {
         }
 
         // Try Redis MGET first
-        let cache_keys: Vec<String> = items
-            .iter()
-            .map(|(ct, cid)| format!("lc:{ct}:{cid}"))
-            .collect();
+        let mut cache_keys = Vec::with_capacity(items.len());
+        for (ct, cid) in items {
+            cache_keys.push(format!("lc:{ct}:{cid}"));
+        }
 
         let cached_values = self.cache.mget(&cache_keys).await;
 
         let mut results = Vec::with_capacity(items.len());
-        let mut missing_indices = Vec::new();
+        let mut missing_indices = Vec::with_capacity(items.len());
 
         for (i, (ct, cid)) in items.iter().enumerate() {
             if let Some(Some(val)) = cached_values.get(i)
@@ -342,15 +342,17 @@ impl LikeService {
 
         // Fetch missing from DB
         if !missing_indices.is_empty() {
-            let missing_items: Vec<(String, Uuid)> =
-                missing_indices.iter().map(|&i| items[i].clone()).collect();
+            let mut missing_items = Vec::with_capacity(missing_indices.len());
+            for &i in &missing_indices {
+                missing_items.push(items[i].clone());
+            }
 
             let db_counts = like_repository::batch_get_counts(&self.db.reader, &missing_items)
                 .await
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
             // Update results and collect cache entries for pipeline
-            let mut cache_entries: Vec<(String, String)> = Vec::new();
+            let mut cache_entries = Vec::with_capacity(db_counts.len());
             for (ct, cid, count) in db_counts {
                 if let Some(pos) = results
                     .iter()
@@ -364,10 +366,10 @@ impl LikeService {
             // Populate cache in a single pipeline round-trip
             if !cache_entries.is_empty() {
                 let ttl = self.config.cache_ttl_like_counts_secs;
-                let entries: Vec<(&str, &str, u64)> = cache_entries
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str(), ttl))
-                    .collect();
+                let mut entries = Vec::with_capacity(cache_entries.len());
+                for (k, v) in &cache_entries {
+                    entries.push((k.as_str(), v.as_str(), ttl));
+                }
                 self.cache.mset_ex(&entries).await;
             }
         }
@@ -402,18 +404,16 @@ impl LikeService {
             .collect();
 
         // Ensure all requested items appear in results
-        let results: Vec<BatchStatusResult> = items
-            .iter()
-            .map(|(ct, cid)| {
-                let liked_at = result_map.remove(&(ct.clone(), *cid)).flatten();
-                BatchStatusResult {
-                    content_type: ct.clone(),
-                    content_id: *cid,
-                    liked: liked_at.is_some(),
-                    liked_at,
-                }
-            })
-            .collect();
+        let mut results = Vec::with_capacity(items.len());
+        for (ct, cid) in items {
+            let liked_at = result_map.remove(&(ct.clone(), *cid)).flatten();
+            results.push(BatchStatusResult {
+                content_type: ct.clone(),
+                content_id: *cid,
+                liked: liked_at.is_some(),
+                liked_at,
+            });
+        }
 
         Ok(results)
     }
@@ -440,10 +440,12 @@ impl LikeService {
                 .await;
 
             if !cached.is_empty() {
-                let items: Vec<TopLikedItem> = cached
-                    .into_iter()
-                    .filter_map(|(member, score)| parse_leaderboard_member(&member, score))
-                    .collect();
+                let mut items = Vec::with_capacity(cached.len());
+                for (member, score) in &cached {
+                    if let Some(item) = parse_leaderboard_member(member, *score) {
+                        items.push(item);
+                    }
+                }
 
                 return Ok(TopLikedResponse {
                     window: window.as_str().to_string(),
@@ -462,14 +464,14 @@ impl LikeService {
             .await
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        let items: Vec<TopLikedItem> = rows
-            .into_iter()
-            .map(|(ct, cid, count)| TopLikedItem {
+        let mut items = Vec::with_capacity(rows.len());
+        for (ct, cid, count) in rows {
+            items.push(TopLikedItem {
                 content_type: ct,
                 content_id: cid,
                 count,
-            })
-            .collect();
+            });
+        }
 
         Ok(TopLikedResponse {
             window: window.as_str().to_string(),
