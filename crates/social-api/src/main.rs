@@ -1,6 +1,7 @@
 mod cache;
 mod clients;
 mod config;
+mod extractors;
 mod db;
 mod handlers;
 mod logging;
