@@ -153,6 +153,22 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Creates an `Internal` error and immediately logs it with a backtrace at the call site.
+    ///
+    /// Prefer this over `AppError::Internal(msg.into())` at error-origin sites so the
+    /// backtrace points to where the problem was discovered, not the response layer.
+    /// Requires `RUST_BACKTRACE=1` (or `RUST_LIB_BACKTRACE=1`) at runtime for a real trace.
+    pub fn internal(msg: impl std::fmt::Display) -> Self {
+        let msg_str = msg.to_string();
+        let bt = std::backtrace::Backtrace::capture();
+        tracing::error!(
+            error = %msg_str,
+            backtrace = %bt,
+            "Internal error at origin"
+        );
+        Self::Internal(msg_str)
+    }
+
     /// Convert to an API error with the given request ID.
     pub fn to_api_error(&self, request_id: &str) -> ApiError {
         let (code, message, details) = match self {

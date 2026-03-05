@@ -49,7 +49,9 @@ fn normalize_path(path: &str) -> String {
 
 /// Initialize Prometheus recorder and return the handle.
 pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+    let builder = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .set_buckets(&[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5])
+        .expect("Invalid bucket boundaries");
     let handle = builder
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
@@ -81,6 +83,10 @@ pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
         "Active SSE connections"
     );
     metrics::describe_counter!("social_api_likes_total", "Total like/unlike operations");
+    metrics::describe_gauge!(
+        "social_api_db_pool_connections",
+        "Database connection pool size by pool (writer/reader) and state (active/idle/max)"
+    );
 
     handle
 }

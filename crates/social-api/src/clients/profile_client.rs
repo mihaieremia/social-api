@@ -85,10 +85,10 @@ impl TokenValidator for HttpTokenValidator {
             ));
         }
 
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            tracing::error!(service = "profile_api", error = %e, "Failed to parse profile response");
-            AppError::Internal("Failed to parse profile response".to_string())
-        })?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::internal(format!("Failed to parse profile response: {e}")))?;
 
         let valid = body.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
         if !valid {
@@ -101,11 +101,11 @@ impl TokenValidator for HttpTokenValidator {
         let user_id_str = body
             .get("user_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AppError::Internal("Missing user_id in profile response".to_string()))?;
+            .ok_or_else(|| AppError::internal("Missing user_id in profile response"))?;
 
         let uuid_str = user_id_str.strip_prefix("usr_").unwrap_or(user_id_str);
         let user_id = Uuid::parse_str(uuid_str)
-            .map_err(|_| AppError::Internal(format!("Invalid user_id format: {user_id_str}")))?;
+            .map_err(|_| AppError::internal(format!("Invalid user_id format: {user_id_str}")))?;
 
         let display_name = body
             .get("display_name")

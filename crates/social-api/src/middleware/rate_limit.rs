@@ -113,7 +113,11 @@ async fn check_rate_limit(
             }
         }
         _ => {
-            // Redis unavailable — allow request (graceful degradation)
+            // Redis unavailable — fail open (allow the request).
+            // Intentional: degraded performance (no rate limiting) is preferable to
+            // dropping legitimate traffic when the cache is down.
+            // Monitor `social_api_cache_operations_total{result="error"}` to alert on
+            // Redis unavailability and restore rate limiting as soon as Redis recovers.
             RateLimitResult {
                 allowed: true,
                 current: 0,

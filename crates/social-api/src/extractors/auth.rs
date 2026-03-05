@@ -47,6 +47,8 @@ where
         match app_state.token_validator().validate(token).await {
             Ok(user) => {
                 app_state.profile_breaker().record_success();
+                // Record authenticated user_id into the active TraceLayer span.
+                tracing::Span::current().record("user_id", user.user_id.to_string());
                 Ok(AuthUser(user))
             }
             Err(e) => {

@@ -23,6 +23,9 @@ pub async fn inject_request_id(mut request: Request, next: Next) -> Response {
         request.headers_mut().insert(REQUEST_ID_HEADER, val.clone());
     }
 
+    // Record into the active TraceLayer span (created by the outermost layer).
+    tracing::Span::current().record("request_id", &request_id);
+
     let mut response = next.run(request).await;
 
     // Add to response headers

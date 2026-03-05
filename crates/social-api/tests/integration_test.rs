@@ -13,6 +13,8 @@ const TOKEN_USER_1: &str = "tok_user_1";
 const TOKEN_USER_2: &str = "tok_user_2";
 const TOKEN_USER_3: &str = "tok_user_3";
 const TOKEN_USER_4: &str = "tok_user_4";
+// TOKEN_USER_5 is reserved exclusively for the rate limit test — do not use in other write tests.
+const TOKEN_USER_5: &str = "tok_user_5";
 const VALID_POST_ID: &str = "731b0395-4888-4822-b516-05b4b7bf2089";
 const VALID_POST_ID_2: &str = "9601c044-6130-4ee5-a155-96570e05a02f";
 // Dedicated IDs for pagination test (bonus_hunter type to avoid conflicts)
@@ -503,6 +505,252 @@ async fn test_circuit_breaker_metric_registered() {
         body.contains("social_api_external_call_duration_seconds"),
         "Expected external call histogram in metrics output"
     );
+}
+
+// ============================================================
+// Concurrent Likes — Race Condition Verification
+// ============================================================
+
+/// Spawns 5 concurrent like requests (one per user) against the same content item.
+/// Verifies the unique constraint holds and final count equals exactly 5.
+#[tokio::test]
+#[ignore]
+async fn test_concurrent_likes_race_condition() {
+    use futures::future::join_all;
+
+    // Dedicated top_picks ID not used by any other test
+    const CONTENT_TYPE: &str = "top_picks";
+    const CONCURRENT_CONTENT_ID: &str = "c0000003-0001-4000-8000-000000000001";
+
+    let tokens = [
+        TOKEN_USER_1,
+        TOKEN_USER_2,
+        TOKEN_USER_3,
+        TOKEN_USER_4,
+        TOKEN_USER_5,
+    ];
+
+    // Ensure clean state: unlike for all 5 users before the test
+    for token in &tokens {
+        let _ = client()
+            .delete(format!(
+                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}"
+            ))
+            .header("Authorization", auth_header(token))
+            .send()
+            .await;
+    }
+
+    // Fire 5 concurrent like requests, one per user
+    let futures: Vec<_> = tokens
+        .iter()
+        .map(|&token| async move {
+            client()
+                .post(format!("{BASE_URL}/v1/likes"))
+                .header("Authorization", format!("Bearer {token}"))
+                .json(&json!({
+                    "content_type": CONTENT_TYPE,
+                    "content_id": CONCURRENT_CONTENT_ID
+                }))
+                .send()
+                .await
+                .unwrap()
+        })
+        .collect();
+
+    let responses = join_all(futures).await;
+
+    // All 5 must succeed (201 Created, not 500 or duplicate key error)
+    for (i, resp) in responses.iter().enumerate() {
+        assert_eq!(
+            resp.status().as_u16(),
+            201,
+            "Concurrent request {i} expected 201, got {}",
+            resp.status()
+        );
+    }
+
+    // Final count must be exactly 5 — no phantom duplicates
+    let count_resp = client()
+        .get(format!(
+            "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}/count"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(count_resp.status(), 200);
+    let body: Value = count_resp.json().await.unwrap();
+    assert_eq!(
+        body["count"], 5,
+        "Expected count=5 after 5 concurrent likes, got {}",
+        body["count"]
+    );
+
+    // Cleanup
+    for token in &tokens {
+        let _ = client()
+            .delete(format!(
+                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}"
+            ))
+            .header("Authorization", auth_header(token))
+            .send()
+            .await;
+    }
+}
+
+// ============================================================
+// SSE Lifecycle
+// ============================================================
+
+/// Connects to the SSE stream, triggers a like event, and asserts the event is received.
+#[tokio::test]
+#[ignore]
+async fn test_sse_receives_like_event() {
+    // Dedicated bonus_hunter ID not used by other tests
+    const SSE_CONTENT_TYPE: &str = "bonus_hunter";
+    const SSE_CONTENT_ID: &str = "e5f6a7b8-c9d0-1234-ef01-345678901234";
+
+    // Ensure clean state
+    let _ = client()
+        .delete(format!(
+            "{BASE_URL}/v1/likes/{SSE_CONTENT_TYPE}/{SSE_CONTENT_ID}"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_1))
+        .send()
+        .await;
+
+    // Connect to SSE stream
+    let mut sse_resp = client()
+        .get(format!(
+            "{BASE_URL}/v1/likes/stream?content_type={SSE_CONTENT_TYPE}&content_id={SSE_CONTENT_ID}"
+        ))
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_resp.status(), 200);
+
+    // Trigger a like 200ms after connecting (gives SSE time to subscribe)
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        client()
+            .post(format!("{BASE_URL}/v1/likes"))
+            .header("Authorization", auth_header(TOKEN_USER_1))
+            .json(&json!({
+                "content_type": SSE_CONTENT_TYPE,
+                "content_id": SSE_CONTENT_ID
+            }))
+            .send()
+            .await
+            .unwrap();
+    });
+
+    // Read chunks until a like event appears (5s timeout)
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match sse_resp.chunk().await.unwrap() {
+                Some(chunk) => {
+                    let s = String::from_utf8_lossy(&chunk);
+                    if s.contains("\"event\":\"like\"") {
+                        return true;
+                    }
+                }
+                None => return false,
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        matches!(found, Ok(true)),
+        "Expected to receive a 'like' SSE event within 5s"
+    );
+
+    // Cleanup
+    let _ = client()
+        .delete(format!(
+            "{BASE_URL}/v1/likes/{SSE_CONTENT_TYPE}/{SSE_CONTENT_ID}"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_1))
+        .send()
+        .await;
+}
+
+// ============================================================
+// Rate Limiting
+// ============================================================
+
+/// Fires 31 write requests with the same token and asserts the 31st returns 429.
+///
+/// Uses TOKEN_USER_5 exclusively — no other test may issue write requests with this token.
+/// The sliding window is 60s; ensure a fresh window by not running this immediately
+/// after another run of this test.
+#[tokio::test]
+#[ignore]
+async fn test_rate_limit_write_endpoint() {
+    const CONTENT_TYPE: &str = "top_picks";
+    const RATE_LIMIT_CONTENT_ID: &str = "c0000003-0002-4000-8000-000000000002";
+
+    // Ensure clean state
+    let _ = client()
+        .delete(format!(
+            "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{RATE_LIMIT_CONTENT_ID}"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_5))
+        .send()
+        .await;
+
+    let mut hit_rate_limit = false;
+
+    // Fire up to 31 requests; expect the 31st to be rate-limited
+    for i in 0..=30u32 {
+        let resp = client()
+            .post(format!("{BASE_URL}/v1/likes"))
+            .header("Authorization", auth_header(TOKEN_USER_5))
+            .json(&json!({
+                "content_type": CONTENT_TYPE,
+                "content_id": RATE_LIMIT_CONTENT_ID
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let status = resp.status().as_u16();
+        if status == 429 {
+            let has_retry_after = resp.headers().get("retry-after").is_some();
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(
+                body["error"]["code"], "RATE_LIMITED",
+                "Request {i}: expected RATE_LIMITED error code"
+            );
+            assert!(
+                has_retry_after,
+                "Request {i}: 429 response missing Retry-After header"
+            );
+            hit_rate_limit = true;
+            break;
+        }
+
+        // Allow 201 (new like) or re-like idempotency
+        assert!(
+            status == 201,
+            "Request {i}: expected 201 before rate limit, got {status}"
+        );
+    }
+
+    assert!(
+        hit_rate_limit,
+        "Expected rate limit (429) within 31 requests — check RATE_LIMIT_WRITE_PER_MINUTE config"
+    );
+
+    // Cleanup
+    let _ = client()
+        .delete(format!(
+            "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{RATE_LIMIT_CONTENT_ID}"
+        ))
+        .header("Authorization", auth_header(TOKEN_USER_5))
+        .send()
+        .await;
 }
 
 /// Verifies that when the Profile API is unreachable, the circuit breaker

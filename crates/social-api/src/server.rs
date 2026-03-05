@@ -3,6 +3,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
+use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -10,6 +11,25 @@ use crate::handlers;
 use crate::middleware;
 use crate::openapi::ApiDoc;
 use crate::state::AppState;
+
+/// Custom `MakeSpan` that pre-registers `request_id` and `user_id` as empty fields.
+///
+/// - `request_id` is recorded by `inject_request_id` middleware (runs inside this span).
+/// - `user_id` is recorded by `AuthUser` extractor on authenticated requests.
+#[derive(Clone)]
+struct MakeRequestSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for MakeRequestSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        tracing::info_span!(
+            "request",
+            method = %request.method(),
+            path = %request.uri().path(),
+            request_id = tracing::field::Empty,
+            user_id = tracing::field::Empty,
+        )
+    }
+}
 
 /// Build the Axum router with all routes and middleware.
 pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router {
@@ -63,7 +83,10 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
 
     // Merge write + read routes with shared state and global middleware
     // Layer order (last added = outermost = runs first):
-    //   inflight → request_id → error_context → metrics → rate_limit → handler
+    //   TraceLayer → inflight → request_id → error_context → metrics → rate_limit → handler
+    //
+    // TraceLayer is outermost so its span is active for all subsequent middleware.
+    // inject_request_id records request_id into the span; AuthUser extractor records user_id.
     let api_routes = Router::new()
         .merge(write_routes)
         .merge(read_routes)
@@ -78,7 +101,16 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .layer(axum_middleware::from_fn_with_state(
             state,
             middleware::inflight::track_inflight,
-        ));
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(MakeRequestSpan)
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new()
+                        .level(tracing::Level::INFO)
+                        .latency_unit(tower_http::LatencyUnit::Millis),
+                ),
+        );
 
     Router::new()
         .merge(health_routes)

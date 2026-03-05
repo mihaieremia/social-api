@@ -13,6 +13,18 @@ impl IntoResponse for ApiErrorResponse {
         let api_error = self.0.to_api_error("unknown");
         let status = StatusCode::from_u16(api_error.http_status())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Log all 500s at error level. AppError::internal() already logs the
+        // origin backtrace; this catches Database/Cache variants and any 500
+        // not created via AppError::internal().
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(
+                error = %self.0,
+                error_code = %self.0.error_code(),
+                "Responding with 500 INTERNAL_ERROR"
+            );
+        }
+
         (status, Json(api_error)).into_response()
     }
 }

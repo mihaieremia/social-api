@@ -69,6 +69,12 @@ async fn main() {
         shutdown_token.clone(),
     );
 
+    let pool_metrics_handle = tasks::db_pool_metrics::spawn_db_pool_metrics(
+        db.clone(),
+        config.clone(),
+        shutdown_token.clone(),
+    );
+
     // ── 5. Build router and bind ──
     let app = server::build_router(app_state.clone(), metrics_handle);
 
@@ -117,6 +123,8 @@ async fn main() {
         Ok(Err(e)) => tracing::warn!(error = %e, "Leaderboard refresh task panicked"),
         Err(_) => tracing::warn!("Leaderboard refresh task did not stop in time"),
     }
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), pool_metrics_handle).await;
 
     // ── 9. Final metrics snapshot ──
     tracing::info!("Final metrics snapshot captured");
