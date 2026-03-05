@@ -133,7 +133,6 @@ impl AppState {
         self.inner.inflight_count.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
     pub fn new_for_test(
         db: DbPools,
         cache: CacheManager,

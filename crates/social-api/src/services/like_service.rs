@@ -52,7 +52,6 @@ impl LikeService {
 
     /// Test constructor — accepts a pre-built ContentValidator trait object.
     /// Production code uses `new()` which builds `HttpContentValidator`.
-    #[cfg(test)]
     pub fn new_with_validator(
         db: DbPools,
         cache: CacheManager,
