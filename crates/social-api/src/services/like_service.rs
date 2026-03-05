@@ -526,3 +526,368 @@ fn parse_leaderboard_member(member: &str, score: f64) -> Option<TopLikedItem> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::{postgres::Postgres, redis::Redis};
+    use uuid::Uuid;
+
+    use crate::cache::manager::{CacheManager, create_pool};
+    use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    use crate::clients::content_client::ContentValidator;
+    use crate::config::Config;
+    use crate::db::DbPools;
+    use shared::errors::AppError;
+
+    // --- Content validator stubs ---
+
+    struct AlwaysValid;
+    #[async_trait::async_trait]
+    impl ContentValidator for AlwaysValid {
+        async fn validate(&self, _: &str, _: Uuid) -> Result<bool, AppError> {
+            Ok(true)
+        }
+    }
+
+    struct AlwaysNotFound;
+    #[async_trait::async_trait]
+    impl ContentValidator for AlwaysNotFound {
+        async fn validate(&self, _: &str, _: Uuid) -> Result<bool, AppError> {
+            Ok(false)
+        }
+    }
+
+    // --- Container bootstrap helper ---
+
+    struct TestInfra {
+        pub service: LikeService,
+        // Containers held here — dropped (stopped) when TestInfra is dropped
+        _pg: testcontainers::ContainerAsync<Postgres>,
+        _redis: testcontainers::ContainerAsync<Redis>,
+    }
+
+    async fn setup(validator: Arc<dyn ContentValidator>) -> TestInfra {
+        let pg = Postgres::default().start().await.expect("postgres container");
+        let redis = Redis::default().start().await.expect("redis container");
+
+        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&db_url)
+            .await
+            .expect("connect test postgres");
+
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let db = DbPools {
+            writer: pool.clone(),
+            reader: pool,
+        };
+
+        let mut config = Config::new_for_test();
+        config.redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+        let redis_pool = create_pool(&config).await.expect("redis pool");
+        let cache = CacheManager::new(redis_pool);
+
+        let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            recovery_timeout: std::time::Duration::from_secs(30),
+            success_threshold: 2,
+            service_name: "content_api_test".to_string(),
+            rate_window: std::time::Duration::from_secs(30),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
+        }));
+
+        let service = LikeService {
+            db,
+            cache,
+            content_validator: validator,
+            config,
+            content_breaker: breaker,
+        };
+
+        TestInfra {
+            service,
+            _pg: pg,
+            _redis: redis,
+        }
+    }
+
+    // --- Tests ---
+
+    #[tokio::test]
+    async fn test_like_new_content_returns_count_one() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let resp = infra
+            .service
+            .like(Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(resp.liked);
+        assert_eq!(resp.already_existed, Some(false));
+        assert_eq!(resp.count, 1);
+        assert!(resp.liked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_like_same_content_twice_is_idempotent() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        infra.service.like(user_id, "post", content_id).await.unwrap();
+        let resp = infra.service.like(user_id, "post", content_id).await.unwrap();
+
+        assert_eq!(resp.already_existed, Some(true));
+        assert_eq!(resp.count, 1, "count must not increase on duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_unlike_not_liked_returns_was_liked_false() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let resp = infra
+            .service
+            .unlike(Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(!resp.liked);
+        assert_eq!(resp.was_liked, Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_like_then_unlike_count_returns_to_zero() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        infra.service.like(user_id, "post", content_id).await.unwrap();
+        let resp = infra
+            .service
+            .unlike(user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.count, 0);
+        assert_eq!(resp.was_liked, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_get_count_cache_hit_returns_cached_value() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let content_id = Uuid::new_v4();
+
+        // Pre-seed cache with a known value (bypassing DB entirely)
+        let cache_key = format!("lc:post:{content_id}");
+        infra.service.cache.set(&cache_key, "42", 300).await;
+
+        let resp = infra.service.get_count("post", content_id).await.unwrap();
+        assert_eq!(resp.count, 42, "must return cached value, not DB count of 0");
+    }
+
+    #[tokio::test]
+    async fn test_get_count_cache_miss_falls_back_to_db() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // Like to create a DB record, clear cache to force DB fallback
+        infra.service.like(user_id, "post", content_id).await.unwrap();
+        infra
+            .service
+            .cache
+            .del(&format!("lc:post:{content_id}"))
+            .await;
+
+        let resp = infra.service.get_count("post", content_id).await.unwrap();
+        assert_eq!(resp.count, 1, "must fall back to DB count");
+    }
+
+    #[tokio::test]
+    async fn test_content_not_found_returns_error() {
+        let infra = setup(Arc::new(AlwaysNotFound)).await;
+        let err = infra
+            .service
+            .like(Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::ContentNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_batch_counts_over_100_returns_error() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let items: Vec<(String, Uuid)> = (0..101)
+            .map(|_| ("post".to_string(), Uuid::new_v4()))
+            .collect();
+
+        let err = infra.service.batch_counts(&items).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::BatchTooLarge { size: 101, max: 100 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_batch_statuses_over_100_returns_error() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let items: Vec<(String, Uuid)> = (0..101)
+            .map(|_| ("post".to_string(), Uuid::new_v4()))
+            .collect();
+
+        let err = infra
+            .service
+            .batch_statuses(Uuid::new_v4(), &items)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::BatchTooLarge { size: 101, max: 100 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_batch_counts_cache_miss_fetches_from_db() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let content_id = Uuid::new_v4();
+
+        // Create 2 likes via the service (writes to DB + populates cache)
+        for _ in 0..2 {
+            infra
+                .service
+                .like(Uuid::new_v4(), "post", content_id)
+                .await
+                .unwrap();
+        }
+        // Clear cache to force DB fallback in batch_counts
+        infra
+            .service
+            .cache
+            .del(&format!("lc:post:{content_id}"))
+            .await;
+
+        let results = infra
+            .service
+            .batch_counts(&[("post".to_string(), content_id)])
+            .await
+            .unwrap();
+
+        assert_eq!(results[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_leaderboard_reads_from_zset_cache() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let content_id = Uuid::new_v4();
+
+        // Seed leaderboard ZSET directly
+        infra
+            .service
+            .cache
+            .replace_sorted_set("lb:all", &[(format!("post:{content_id}"), 7.0)])
+            .await;
+
+        let resp = infra
+            .service
+            .get_leaderboard(None, shared::types::TimeWindow::All, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].count, 7);
+        assert_eq!(resp.items[0].content_id, content_id);
+    }
+
+    #[tokio::test]
+    async fn test_get_leaderboard_falls_back_to_db_on_empty_zset() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let content_id = Uuid::new_v4();
+
+        // Like 3 times — no ZSET seeded, so must fall back to DB
+        for _ in 0..3 {
+            infra
+                .service
+                .like(Uuid::new_v4(), "post", content_id)
+                .await
+                .unwrap();
+        }
+
+        let resp = infra
+            .service
+            .get_leaderboard(None, shared::types::TimeWindow::All, 10)
+            .await
+            .unwrap();
+
+        assert!(!resp.items.is_empty());
+        assert_eq!(resp.items[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_likes_cursor_pagination() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+        let user_id = Uuid::new_v4();
+
+        for _ in 0..5 {
+            infra
+                .service
+                .like(user_id, "post", Uuid::new_v4())
+                .await
+                .unwrap();
+        }
+
+        let page1 = infra
+            .service
+            .get_user_likes(user_id, None, None, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+        assert!(page1.next_cursor.is_some());
+
+        let page2 = infra
+            .service
+            .get_user_likes(user_id, None, page1.next_cursor.as_deref(), 2)
+            .await
+            .unwrap();
+
+        assert!(!page2.items.is_empty());
+        let page1_ids: std::collections::HashSet<_> =
+            page1.items.iter().map(|i| i.content_id).collect();
+        for item in &page2.items {
+            assert!(!page1_ids.contains(&item.content_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_open_returns_dependency_unavailable() {
+        let infra = setup(Arc::new(AlwaysValid)).await;
+
+        // Trip the breaker manually by recording failures
+        for _ in 0..5 {
+            infra.service.content_breaker.record_failure();
+        }
+
+        let err = infra
+            .service
+            .like(Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::DependencyUnavailable(_)));
+    }
+}
