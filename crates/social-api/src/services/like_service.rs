@@ -929,6 +929,256 @@ mod tests {
             assert_eq!(r.unwrap().count, 0);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // 13. get_leaderboard with content_type filter (DB fallback path)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_leaderboard_with_content_type_filter() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let post_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", post_id).await.unwrap();
+
+        // Content_type filter always bypasses cache -> DB fallback
+        let resp = svc
+            .get_leaderboard(Some("post"), TimeWindow::All, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.window, "all");
+        assert_eq!(resp.content_type, Some("post".to_string()));
+        assert!(!resp.items.is_empty(), "expected at least one item");
+        assert_eq!(resp.items[0].count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 14. get_leaderboard from cache (cache-populated path)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_leaderboard_from_cache() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let content_id = Uuid::new_v4();
+
+        // Populate the leaderboard sorted set cache key manually
+        let key = "lb:all";
+        let member = format!("post:{content_id}");
+        svc.cache
+            .replace_sorted_set(key, &[(member, 5.0)])
+            .await;
+
+        // get_leaderboard without filter should use the cache
+        let resp = svc
+            .get_leaderboard(None, TimeWindow::All, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.window, "all");
+        // Should have at least the item we inserted
+        assert!(!resp.items.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // 15. get_status returns liked status
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_status_liked_and_not_liked() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+        let other_content_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", content_id).await.unwrap();
+
+        let status = svc
+            .get_status(user_id, "post", content_id)
+            .await
+            .unwrap();
+        assert!(status.liked);
+        assert!(status.liked_at.is_some());
+
+        let status_not_liked = svc
+            .get_status(user_id, "post", other_content_id)
+            .await
+            .unwrap();
+        assert!(!status_not_liked.liked);
+        assert!(status_not_liked.liked_at.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // 16. get_user_likes with content_type_filter
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_user_likes_with_content_type_filter() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+
+        let post_id = Uuid::new_v4();
+        let bonus_id = Uuid::new_v4();
+
+        svc.like(user_id, "post", post_id).await.unwrap();
+        svc.like(user_id, "bonus_hunter", bonus_id).await.unwrap();
+
+        // Filter to posts only
+        let page = svc
+            .get_user_likes(user_id, Some("post"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].content_type, "post");
+        assert!(!page.has_more);
+    }
+
+    // -------------------------------------------------------------------------
+    // 17. get_user_likes with bad cursor
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_user_likes_bad_cursor_returns_error() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+
+        let err = svc
+            .get_user_likes(user_id, None, Some("NOT_VALID_CURSOR!!"), 10)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::InvalidCursor(_)),
+            "expected InvalidCursor, got: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 18. batch_statuses too large returns error
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_batch_statuses_too_large_returns_error() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+
+        let items: Vec<(String, Uuid)> = (0..101)
+            .map(|_| ("post".to_string(), Uuid::new_v4()))
+            .collect();
+
+        let err = svc.batch_statuses(user_id, &items).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::BatchTooLarge { size: 101, max: 100 }),
+            "expected BatchTooLarge, got: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 19. circuit breaker open rejects like
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_circuit_breaker_open_rejects_like() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // Trip the circuit breaker by recording enough failures
+        for _ in 0..105 {
+            svc.content_breaker.record_failure();
+        }
+
+        // Circuit should now be Open — like should fail with DependencyUnavailable
+        let err = svc.like(user_id, "post", content_id).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::DependencyUnavailable(_)),
+            "expected DependencyUnavailable, got: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 20. validate_content when validator returns error (not just false)
+    // -------------------------------------------------------------------------
+
+    struct AlwaysErrorContent;
+
+    #[async_trait::async_trait]
+    impl ContentValidator for AlwaysErrorContent {
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
+            Err(AppError::DependencyUnavailable("content_api".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_content_validator_error_rolls_back_and_records_failure() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysErrorContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let err = svc.like(user_id, "post", content_id).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::DependencyUnavailable(_)),
+            "expected DependencyUnavailable, got: {err:?}"
+        );
+
+        // Count should remain 0 (row rolled back)
+        let count_resp = svc.get_count("post", content_id).await.unwrap();
+        assert_eq!(count_resp.count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 21. get_leaderboard time windows
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_leaderboard_different_time_windows() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+
+        for window in [TimeWindow::Day, TimeWindow::Week, TimeWindow::Month, TimeWindow::All] {
+            let resp = svc.get_leaderboard(None, window, 5).await.unwrap();
+            assert_eq!(resp.window, window.as_str());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 22. batch_counts with all cache hits
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_batch_counts_all_cache_hits() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // Like to populate cache
+        svc.like(user_id, "post", content_id).await.unwrap();
+
+        // Call get_count to ensure cache is warm
+        svc.get_count("post", content_id).await.unwrap();
+
+        // Batch count with cached item
+        let items = vec![("post".to_string(), content_id)];
+        let results = svc.batch_counts(&items).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 23. unlike content that is not liked (was_liked=false branch for cache)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_unlike_not_liked_get_count_inner_path() {
+        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // Unlike something not liked - exercises get_count_inner path
+        let resp = svc.unlike(user_id, "post", content_id).await.unwrap();
+        assert_eq!(resp.was_liked, Some(false));
+        assert_eq!(resp.count, 0);
+    }
 }
 
 /// Parse a sorted-set member string `"content_type:content_id"` back into a

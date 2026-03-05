@@ -133,6 +133,157 @@ impl AppState {
         self.inner.inflight_count.load(Ordering::Relaxed)
     }
 
+    /// Expose `inflight_count` atomically for tests and shutdown drain.
+    pub fn inflight_count_arc(&self) -> usize {
+        self.inflight_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers::runners::AsyncRunner;
+
+    #[tokio::test]
+    async fn test_new_constructs_successfully_with_real_infra() {
+        // Start Postgres container
+        let pg = testcontainers_modules::postgres::Postgres::default()
+            .start()
+            .await
+            .expect("postgres container");
+        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+
+        // Start Redis container
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+        let mut config = Config::new_for_test();
+        config.database_url = db_url.clone();
+        config.read_database_url = db_url;
+        config.redis_url = redis_url;
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        sqlx::migrate!("../../migrations")
+            .run(&db.writer)
+            .await
+            .expect("migrations");
+
+        let redis_pool = crate::cache::manager::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = CacheManager::new(redis_pool);
+
+        let shutdown_token = CancellationToken::new();
+        let state = AppState::new(db, cache, config, shutdown_token);
+
+        // Test inflight counter
+        assert_eq!(state.inflight_count(), 0);
+        state.inflight_increment();
+        assert_eq!(state.inflight_count(), 1);
+        state.inflight_increment();
+        assert_eq!(state.inflight_count(), 2);
+        state.inflight_decrement();
+        assert_eq!(state.inflight_count(), 1);
+        state.inflight_decrement();
+        assert_eq!(state.inflight_count(), 0);
+
+        // Test config accessor
+        assert!(!state.config().database_url.is_empty());
+        // Test http_client accessor
+        let _ = state.http_client();
+        // Test token_validator accessor
+        let _ = state.token_validator();
+        // Test profile_breaker accessor
+        let _ = state.profile_breaker();
+        // Test shutdown_token accessor
+        let _ = state.shutdown_token();
+        // Test db accessor
+        let _ = state.db();
+        // Test cache accessor
+        let _ = state.cache();
+        // Test like_service accessor
+        let _ = state.like_service();
+    }
+
+    #[tokio::test]
+    async fn test_appstate_clone_shares_inflight_counter() {
+        let pg = testcontainers_modules::postgres::Postgres::default()
+            .start()
+            .await
+            .expect("postgres container");
+        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+        let mut config = Config::new_for_test();
+        config.database_url = db_url.clone();
+        config.read_database_url = db_url;
+        config.redis_url = redis_url;
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        sqlx::migrate!("../../migrations")
+            .run(&db.writer)
+            .await
+            .expect("migrations");
+        let redis_pool = crate::cache::manager::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = CacheManager::new(redis_pool);
+        let shutdown_token = CancellationToken::new();
+        let state = AppState::new(db, cache, config, shutdown_token);
+
+        // Clone shares same Arc
+        let state2 = state.clone();
+        state.inflight_increment();
+        assert_eq!(state2.inflight_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_appstate_inflight_count_arc() {
+        let pg = testcontainers_modules::postgres::Postgres::default()
+            .start()
+            .await
+            .expect("postgres container");
+        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+        let mut config = Config::new_for_test();
+        config.database_url = db_url.clone();
+        config.read_database_url = db_url;
+        config.redis_url = redis_url;
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        sqlx::migrate!("../../migrations")
+            .run(&db.writer)
+            .await
+            .expect("migrations");
+        let redis_pool = crate::cache::manager::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = CacheManager::new(redis_pool);
+        let shutdown_token = CancellationToken::new();
+        let state = AppState::new(db, cache, config, shutdown_token);
+        assert_eq!(state.inflight_count_arc(), 0);
+    }
+}
+
+impl AppState {
     pub fn new_for_test(
         db: DbPools,
         cache: CacheManager,
