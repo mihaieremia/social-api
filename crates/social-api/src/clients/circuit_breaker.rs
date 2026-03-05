@@ -61,6 +61,8 @@ struct Inner {
     last_failure_time: Option<Instant>,
     /// Sliding window of recent call outcomes for failure rate calculation.
     call_window: VecDeque<CallRecord>,
+    /// True while a probe request is in-flight during HalfOpen.
+    probe_in_flight: bool,
 }
 
 /// Thread-safe circuit breaker state machine.
@@ -86,6 +88,7 @@ impl CircuitBreaker {
                 consecutive_successes: 0,
                 last_failure_time: None,
                 call_window: VecDeque::new(),
+                probe_in_flight: false,
             }),
         }
     }
@@ -98,7 +101,14 @@ impl CircuitBreaker {
     pub fn allow_request(&self) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match inner.state {
-            CircuitState::Closed | CircuitState::HalfOpen => true,
+            CircuitState::Closed => true,
+            CircuitState::HalfOpen => {
+                if inner.probe_in_flight {
+                    return false;
+                }
+                inner.probe_in_flight = true;
+                true
+            }
             CircuitState::Open => {
                 let elapsed = inner
                     .last_failure_time
@@ -106,6 +116,8 @@ impl CircuitBreaker {
                     .unwrap_or(false);
                 if elapsed {
                     Self::do_transition(&self.config, &mut inner, CircuitState::HalfOpen);
+                    // This caller gets the probe slot.
+                    inner.probe_in_flight = true;
                 }
                 elapsed
             }
@@ -116,6 +128,7 @@ impl CircuitBreaker {
     pub fn record_success(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.consecutive_failures = 0;
+        inner.probe_in_flight = false;
 
         // No point tracking outcomes we're already rejecting.
         if inner.state != CircuitState::Open {
@@ -134,6 +147,7 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.consecutive_successes = 0;
+        inner.probe_in_flight = false;
         inner.last_failure_time = Some(Instant::now());
 
         // No point tracking outcomes we're already rejecting.
@@ -221,14 +235,17 @@ impl CircuitBreaker {
             CircuitState::Closed => {
                 inner.consecutive_failures = 0;
                 inner.consecutive_successes = 0;
+                inner.probe_in_flight = false;
                 // Clear window on close so stale failures don't re-trip via rate check.
                 inner.call_window.clear();
             }
             CircuitState::HalfOpen => {
                 inner.consecutive_successes = 0;
+                inner.probe_in_flight = false;
             }
             CircuitState::Open => {
                 inner.consecutive_successes = 0;
+                inner.probe_in_flight = false;
             }
         }
     }
@@ -424,7 +441,74 @@ mod tests {
             .collect();
 
         let allowed: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert!(allowed.iter().all(|&a| a));
+        // Only one probe should be allowed through; the rest are blocked while
+        // the probe is in-flight.
+        let allowed_count = allowed.iter().filter(|&&a| a).count();
+        assert_eq!(allowed_count, 1, "exactly one concurrent probe should be allowed in HalfOpen");
         assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_half_open_allows_only_one_probe_concurrently() {
+        let config = CircuitBreakerConfig {
+            recovery_timeout: Duration::from_millis(10),
+            ..test_config()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Open the breaker.
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for recovery timeout to expire.
+        std::thread::sleep(Duration::from_millis(20));
+
+        // First allow_request: transitions to HalfOpen and grants the probe.
+        assert!(cb.allow_request(), "first caller should get the probe slot");
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Second allow_request while probe is in-flight: must be rejected.
+        assert!(!cb.allow_request(), "second caller should be blocked while probe is in-flight");
+
+        // Probe succeeds -> probe_in_flight cleared.
+        cb.record_success();
+
+        // After enough successes the breaker closes (success_threshold=2).
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        // Closed state allows requests freely again.
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_half_open_probe_failure_reopens_and_clears_flag() {
+        let config = CircuitBreakerConfig {
+            recovery_timeout: Duration::from_millis(10),
+            ..test_config()
+        };
+        let cb = CircuitBreaker::new(config);
+
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Get probe slot.
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Second request blocked.
+        assert!(!cb.allow_request());
+
+        // Probe fails -> back to Open.
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // probe_in_flight must be cleared so the next recovery cycle works.
+        let inner = cb.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!inner.probe_in_flight, "probe_in_flight should be cleared after failure");
     }
 }
