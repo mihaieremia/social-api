@@ -389,11 +389,31 @@ pub async fn get_leaderboard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::PgPool;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::postgres::Postgres;
     use uuid::Uuid;
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_insert_like_new(pool: PgPool) {
+    /// Spin up a fresh Postgres container, run migrations, return a pool.
+    /// The returned container must be kept alive for the duration of the test.
+    async fn setup_pg() -> (sqlx::PgPool, testcontainers::ContainerAsync<Postgres>) {
+        let pg = Postgres::default().start().await.expect("postgres container");
+        let port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect test postgres");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        (pool, pg)
+    }
+
+    #[tokio::test]
+    async fn test_insert_like_new() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -406,8 +426,9 @@ mod tests {
         assert_eq!(row.content_id, content_id);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_insert_like_idempotent(pool: PgPool) {
+    #[tokio::test]
+    async fn test_insert_like_idempotent() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -419,8 +440,9 @@ mod tests {
         assert!(existed, "second insert must report already_existed=true");
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_delete_like_existing(pool: PgPool) {
+    #[tokio::test]
+    async fn test_delete_like_existing() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -432,16 +454,18 @@ mod tests {
         assert!(was_liked);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_delete_like_not_existing(pool: PgPool) {
+    #[tokio::test]
+    async fn test_delete_like_not_existing() {
+        let (pool, _pg) = setup_pg().await;
         let was_liked = delete_like(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
             .await
             .unwrap();
         assert!(!was_liked);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_count_after_likes(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_count_after_likes() {
+        let (pool, _pg) = setup_pg().await;
         let content_id = Uuid::new_v4();
         for _ in 0..3 {
             insert_like(&pool, Uuid::new_v4(), "post", content_id)
@@ -452,14 +476,16 @@ mod tests {
         assert_eq!(count, 3);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_count_zero_for_unknown_content(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_count_zero_for_unknown_content() {
+        let (pool, _pg) = setup_pg().await;
         let count = get_count(&pool, "post", Uuid::new_v4()).await.unwrap();
         assert_eq!(count, 0);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_like_status_liked(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_like_status_liked() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -471,16 +497,18 @@ mod tests {
         assert!(ts.is_some(), "liked_at must be Some after liking");
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_like_status_not_liked(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_like_status_not_liked() {
+        let (pool, _pg) = setup_pg().await;
         let ts = get_like_status(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
             .await
             .unwrap();
         assert!(ts.is_none());
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_batch_get_counts(pool: PgPool) {
+    #[tokio::test]
+    async fn test_batch_get_counts() {
+        let (pool, _pg) = setup_pg().await;
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
@@ -507,8 +535,9 @@ mod tests {
         assert_eq!(map[&("post".to_string(), id2)], 1);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_batch_get_statuses(pool: PgPool) {
+    #[tokio::test]
+    async fn test_batch_get_statuses() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let liked_id = Uuid::new_v4();
         let not_liked_id = Uuid::new_v4();
@@ -535,8 +564,9 @@ mod tests {
         assert!(map[&("post".to_string(), not_liked_id)].is_none());
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_user_likes_pagination(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_user_likes_pagination() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         for _ in 0..5 {
             insert_like(&pool, user_id, "post", Uuid::new_v4())
@@ -570,8 +600,9 @@ mod tests {
         }
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_get_leaderboard_ordered_by_count_desc(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_leaderboard_ordered_by_count_desc() {
+        let (pool, _pg) = setup_pg().await;
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
         let id3 = Uuid::new_v4();
@@ -591,8 +622,9 @@ mod tests {
         assert_eq!(rows[0].2, 3);
     }
 
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn test_unique_constraint_enforced(pool: PgPool) {
+    #[tokio::test]
+    async fn test_unique_constraint_enforced() {
+        let (pool, _pg) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
