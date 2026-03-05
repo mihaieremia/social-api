@@ -1,5 +1,6 @@
 use chrono::{Duration, Utc};
 use shared::types::TimeWindow;
+use tokio_util::sync::CancellationToken;
 
 use crate::cache::manager::CacheManager;
 use crate::config::Config;
@@ -20,13 +21,12 @@ const LEADERBOARD_LIMIT: i64 = 50;
 /// Spawn a background task that periodically refreshes leaderboard sorted sets
 /// in Redis so the leaderboard endpoint can read from cache instead of the DB.
 ///
-/// The returned `JoinHandle` keeps the task alive; dropping it will **not**
-/// cancel the task (tokio tasks are detached by default), but the caller can
-/// use the handle to `.abort()` on shutdown if desired.
+/// Cancels cleanly when the shutdown token is triggered.
 pub fn spawn_leaderboard_refresh(
     db: DbPools,
     cache: CacheManager,
     config: Config,
+    shutdown_token: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let interval_secs = config.leaderboard_refresh_interval_secs;
 
@@ -42,10 +42,16 @@ pub fn spawn_leaderboard_refresh(
         }
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-
-            if let Err(e) = refresh_all_windows(&db, &cache).await {
-                tracing::error!(error = %e, "Leaderboard refresh cycle failed");
+            tokio::select! {
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("Leaderboard refresh task stopping (shutdown)");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {
+                    if let Err(e) = refresh_all_windows(&db, &cache).await {
+                        tracing::error!(error = %e, "Leaderboard refresh cycle failed");
+                    }
+                }
             }
         }
     })
@@ -63,7 +69,7 @@ async fn refresh_all_windows(
                 error = %e,
                 "Failed to refresh leaderboard window"
             );
-            // Continue with remaining windows — don't abort the whole cycle.
+            // Continue with remaining windows -- don't abort the whole cycle.
         }
     }
     Ok(())

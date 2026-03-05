@@ -10,6 +10,7 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -39,8 +40,12 @@ pub async fn like_stream(
     let channel = format!("sse:{}:{}", params.content_type, params.content_id);
     let heartbeat_secs = state.config().sse_heartbeat_interval_secs;
     let redis_url = state.config().redis_url.clone();
+    let shutdown_token = state.shutdown_token().clone();
 
-    let stream = create_sse_stream(redis_url, channel, heartbeat_secs);
+    // Track active SSE connection
+    metrics::gauge!("social_api_sse_connections_active").increment(1.0);
+
+    let stream = create_sse_stream(redis_url, channel, heartbeat_secs, shutdown_token);
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -51,12 +56,23 @@ pub async fn like_stream(
 
 /// Creates an SSE stream that subscribes to a Redis Pub/Sub channel.
 /// Uses a dedicated Redis connection (not from pool) for the subscription.
+/// Monitors the CancellationToken for graceful shutdown.
 fn create_sse_stream(
     redis_url: String,
     channel: String,
     heartbeat_secs: u64,
+    shutdown_token: CancellationToken,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+        // Decrement active connection gauge on any exit path
+        struct SseGuard;
+        impl Drop for SseGuard {
+            fn drop(&mut self) {
+                metrics::gauge!("social_api_sse_connections_active").decrement(1.0);
+            }
+        }
+        let _guard = SseGuard;
+
         // Create a dedicated Redis connection for Pub/Sub
         let client = match redis::Client::open(redis_url.as_str()) {
             Ok(c) => c,
@@ -89,6 +105,15 @@ fn create_sse_stream(
 
         loop {
             tokio::select! {
+                // Shutdown signal takes priority
+                _ = shutdown_token.cancelled() => {
+                    let ts = chrono::Utc::now().to_rfc3339();
+                    yield Ok(Event::default().data(
+                        format!(r#"{{"event":"shutdown","timestamp":"{ts}"}}"#)
+                    ));
+                    tracing::debug!(channel = %channel, "SSE stream closed by shutdown");
+                    break;
+                }
                 msg = msg_stream.next() => {
                     match msg {
                         Some(msg) => {
@@ -97,7 +122,7 @@ fn create_sse_stream(
                             }
                         }
                         None => {
-                            // Channel closed
+                            // Redis channel closed unexpectedly
                             let ts = chrono::Utc::now().to_rfc3339();
                             yield Ok(Event::default().data(
                                 format!(r#"{{"event":"shutdown","timestamp":"{ts}"}}"#)

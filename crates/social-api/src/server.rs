@@ -62,17 +62,22 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         ));
 
     // Merge write + read routes with shared state and global middleware
+    // Layer order (last added = outermost = runs first):
+    //   inflight → request_id → error_context → metrics → rate_limit → handler
     let api_routes = Router::new()
         .merge(write_routes)
         .merge(read_routes)
-        .with_state(state)
-        // Global middleware (outermost-first): request_id → error_context → metrics → rate_limit → handler
+        .with_state(state.clone())
         .layer(axum_middleware::from_fn(middleware::metrics::track_metrics))
         .layer(axum_middleware::from_fn(
             middleware::error_context::patch_error_request_id,
         ))
         .layer(axum_middleware::from_fn(
             middleware::request_id::inject_request_id,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            state,
+            middleware::inflight::track_inflight,
         ));
 
     Router::new()

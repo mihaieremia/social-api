@@ -1,5 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::cache::manager::CacheManager;
 use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -24,10 +27,17 @@ struct AppStateInner {
     token_validator: HttpTokenValidator,
     profile_breaker: Arc<CircuitBreaker>,
     content_breaker: Arc<CircuitBreaker>,
+    shutdown_token: CancellationToken,
+    inflight_count: AtomicUsize,
 }
 
 impl AppState {
-    pub fn new(db: DbPools, cache: CacheManager, config: Config) -> Self {
+    pub fn new(
+        db: DbPools,
+        cache: CacheManager,
+        config: Config,
+        shutdown_token: CancellationToken,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(20)
@@ -69,6 +79,8 @@ impl AppState {
                 token_validator,
                 profile_breaker,
                 content_breaker,
+                shutdown_token,
+                inflight_count: AtomicUsize::new(0),
             }),
         }
     }
@@ -104,5 +116,21 @@ impl AppState {
     #[allow(dead_code)]
     pub fn content_breaker(&self) -> &CircuitBreaker {
         &self.inner.content_breaker
+    }
+
+    pub fn shutdown_token(&self) -> &CancellationToken {
+        &self.inner.shutdown_token
+    }
+
+    pub fn inflight_increment(&self) {
+        self.inner.inflight_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inflight_decrement(&self) {
+        self.inner.inflight_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn inflight_count(&self) -> usize {
+        self.inner.inflight_count.load(Ordering::Relaxed)
     }
 }
