@@ -229,3 +229,74 @@ pub struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<std::collections::HashMap<String, HealthDetail>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_window_from_str() {
+        assert_eq!(TimeWindow::from_str_value("24h"), Some(TimeWindow::Day));
+        assert_eq!(TimeWindow::from_str_value("7d"), Some(TimeWindow::Week));
+        assert_eq!(TimeWindow::from_str_value("30d"), Some(TimeWindow::Month));
+        assert_eq!(TimeWindow::from_str_value("all"), Some(TimeWindow::All));
+        assert_eq!(TimeWindow::from_str_value("1y"), None);
+        assert_eq!(TimeWindow::from_str_value(""), None);
+    }
+
+    #[test]
+    fn test_time_window_duration() {
+        assert_eq!(TimeWindow::Day.duration_secs(), Some(86_400));
+        assert_eq!(TimeWindow::Week.duration_secs(), Some(604_800));
+        assert_eq!(TimeWindow::Month.duration_secs(), Some(2_592_000));
+        assert_eq!(TimeWindow::All.duration_secs(), None);
+    }
+
+    #[test]
+    fn test_time_window_as_str() {
+        assert_eq!(TimeWindow::Day.as_str(), "24h");
+        assert_eq!(TimeWindow::Week.as_str(), "7d");
+        assert_eq!(TimeWindow::Month.as_str(), "30d");
+        assert_eq!(TimeWindow::All.as_str(), "all");
+    }
+
+    #[test]
+    fn test_time_window_display() {
+        assert_eq!(format!("{}", TimeWindow::Day), "24h");
+        assert_eq!(format!("{}", TimeWindow::All), "all");
+    }
+
+    #[test]
+    fn test_content_ref_display() {
+        let cr = ContentRef {
+            content_type: "post".to_string(),
+            content_id: Uuid::parse_str("731b0395-4888-4822-b516-05b4b7bf2089").unwrap(),
+        };
+        assert_eq!(
+            format!("{cr}"),
+            "post:731b0395-4888-4822-b516-05b4b7bf2089"
+        );
+    }
+
+    #[test]
+    fn test_like_event_serialization() {
+        let event = LikeEvent::Liked {
+            user_id: Uuid::nil(),
+            count: 42,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"like\""));
+        assert!(json.contains("\"count\":42"));
+    }
+
+    #[test]
+    fn test_like_status_response_hides_null_liked_at() {
+        let resp = LikeStatusResponse {
+            liked: false,
+            liked_at: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("liked_at"));
+    }
+}

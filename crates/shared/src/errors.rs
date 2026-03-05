@@ -233,3 +233,77 @@ impl AppError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_code_http_status_mapping() {
+        assert_eq!(ErrorCode::Unauthorized.http_status(), 401);
+        assert_eq!(ErrorCode::ContentNotFound.http_status(), 404);
+        assert_eq!(ErrorCode::ContentTypeUnknown.http_status(), 400);
+        assert_eq!(ErrorCode::InvalidContentId.http_status(), 400);
+        assert_eq!(ErrorCode::BatchTooLarge.http_status(), 400);
+        assert_eq!(ErrorCode::InvalidCursor.http_status(), 400);
+        assert_eq!(ErrorCode::InvalidWindow.http_status(), 400);
+        assert_eq!(ErrorCode::RateLimited.http_status(), 429);
+        assert_eq!(ErrorCode::DependencyUnavailable.http_status(), 503);
+        assert_eq!(ErrorCode::InternalError.http_status(), 500);
+    }
+
+    #[test]
+    fn test_app_error_to_api_error() {
+        let err = AppError::ContentNotFound {
+            content_type: "post".to_string(),
+            content_id: "abc-123".to_string(),
+        };
+        let api_err = err.to_api_error("req_1");
+        assert_eq!(api_err.error.code, ErrorCode::ContentNotFound);
+        assert_eq!(api_err.error.request_id, "req_1");
+        assert!(api_err.error.details.is_some());
+    }
+
+    #[test]
+    fn test_app_error_batch_too_large() {
+        let err = AppError::BatchTooLarge { size: 150, max: 100 };
+        assert_eq!(err.error_code(), ErrorCode::BatchTooLarge);
+        let api_err = err.to_api_error("req_2");
+        assert_eq!(api_err.http_status(), 400);
+    }
+
+    #[test]
+    fn test_app_error_rate_limited() {
+        let err = AppError::RateLimited { retry_after_secs: 30 };
+        assert_eq!(err.error_code(), ErrorCode::RateLimited);
+        assert_eq!(err.to_api_error("req_3").http_status(), 429);
+    }
+
+    #[test]
+    fn test_api_error_with_details() {
+        let err = ApiError::new(ErrorCode::InternalError, "test", "req_1")
+            .with_details(serde_json::json!({"key": "value"}));
+        assert!(err.error.details.is_some());
+    }
+
+    #[test]
+    fn test_api_error_serialization() {
+        let err = ApiError::new(ErrorCode::Unauthorized, "bad token", "req_1");
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("UNAUTHORIZED"));
+        assert!(json.contains("bad token"));
+        assert!(json.contains("req_1"));
+    }
+
+    #[test]
+    fn test_database_and_cache_errors_map_to_internal() {
+        assert_eq!(
+            AppError::Database("conn failed".into()).error_code(),
+            ErrorCode::InternalError
+        );
+        assert_eq!(
+            AppError::Cache("timeout".into()).error_code(),
+            ErrorCode::InternalError
+        );
+    }
+}
