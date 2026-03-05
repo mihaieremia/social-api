@@ -59,16 +59,35 @@ impl LikeService {
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        // Validate content exists via external Content API
-        self.validate_content(content_type, content_id).await?;
-
-        // Insert like (idempotent)
+        // Insert first to determine if this is a new or duplicate request.
+        // Duplicate detection must happen before content validation so we can
+        // skip the external HTTP call for requests we've already processed.
         let (like_row, already_existed) =
             like_repository::insert_like(&self.db.writer, user_id, content_type, content_id)
                 .await
                 .map_err(Self::db_err)?;
 
-        // Update cache with conditional INCR (safe against expired keys)
+        if !already_existed {
+            // Content validation is skipped for duplicate likes.
+            // Rationale: if this like already exists, the content was valid at the time it was
+            // first created. Re-validating on every duplicate request would fire a redundant
+            // external HTTP round-trip with no correctness benefit.
+            //
+            // On validation failure for a NEW like: undo the insert so the DB stays consistent.
+            // Best-effort rollback — if delete_like also fails, the orphaned row will have
+            // count=1 with no valid content. Acceptable: content APIs are expected to be available.
+            if let Err(e) = self.validate_content(content_type, content_id).await {
+                let _ = like_repository::delete_like(
+                    &self.db.writer,
+                    user_id,
+                    content_type,
+                    content_id,
+                )
+                .await;
+                return Err(e);
+            }
+        }
+
         let count = if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
             let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
@@ -79,7 +98,6 @@ impl LikeService {
             self.get_count_inner(content_type, content_id).await?
         };
 
-        // Publish SSE event
         if !already_existed {
             let event = serde_json::json!({
                 "event": "like",
