@@ -5,6 +5,7 @@ mod db;
 mod extractors;
 mod handlers;
 mod logging;
+mod middleware;
 mod repositories;
 mod server;
 mod services;
@@ -46,11 +47,14 @@ async fn main() {
         .expect("Failed to initialize Redis pool");
     let cache = CacheManager::new(redis_pool);
 
+    // Initialize Prometheus metrics
+    let metrics_handle = middleware::metrics::init_metrics();
+
     // Build application state
     let app_state = AppState::new(db, cache, config.clone());
 
     // Build router
-    let app = server::build_router(app_state);
+    let app = server::build_router(app_state, metrics_handle);
 
     // Bind listener
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
