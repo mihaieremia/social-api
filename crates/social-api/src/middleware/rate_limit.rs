@@ -65,8 +65,22 @@ struct RateLimitResult {
     reset_secs: u64,
 }
 
+/// Internal abstraction over the sliding-window Lua script.
+/// Kept private — not exposed through AppState.
+#[async_trait::async_trait]
+trait SlidingWindow: Send + Sync {
+    async fn check(&self, key: &str, limit: u64, window_secs: u64) -> RateLimitResult;
+}
+
+#[async_trait::async_trait]
+impl SlidingWindow for CacheManager {
+    async fn check(&self, key: &str, limit: u64, window_secs: u64) -> RateLimitResult {
+        check_rate_limit_inner(self, key, limit, window_secs).await
+    }
+}
+
 /// Check rate limit using Redis sliding window.
-async fn check_rate_limit(
+async fn check_rate_limit_inner(
     cache: &CacheManager,
     key: &str,
     limit: u64,
@@ -179,7 +193,7 @@ pub async fn write_rate_limit(
 
     let key = format!("rl:w:{}", fnv1a_hash(&user_token));
     let limit = state.config().rate_limit_write_per_minute;
-    let result = check_rate_limit(state.cache(), &key, limit, 60).await;
+    let result = check_rate_limit_inner(state.cache(), &key, limit, 60).await;
 
     if !result.allowed {
         return rate_limited_response(&result);
@@ -212,7 +226,7 @@ pub async fn read_rate_limit(
 
     let key = format!("rl:r:{}", fnv1a_hash(&ip));
     let limit = state.config().rate_limit_read_per_minute;
-    let result = check_rate_limit(state.cache(), &key, limit, 60).await;
+    let result = check_rate_limit_inner(state.cache(), &key, limit, 60).await;
 
     if !result.allowed {
         return rate_limited_response(&result);
@@ -235,4 +249,120 @@ fn fnv1a_hash(input: &str) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers::runners::AsyncRunner;
+
+    // --- Pure function tests (no infrastructure needed) ---
+
+    #[test]
+    fn test_fnv1a_hash_is_deterministic() {
+        assert_eq!(fnv1a_hash("tok_user_1"), fnv1a_hash("tok_user_1"));
+        assert_ne!(fnv1a_hash("tok_user_1"), fnv1a_hash("tok_user_2"));
+    }
+
+    #[test]
+    fn test_fnv1a_hash_different_inputs_differ() {
+        let inputs = ["", "a", "ab", "abc", "192.168.1.1", "10.0.0.1"];
+        let hashes: Vec<u64> = inputs.iter().map(|s| fnv1a_hash(s)).collect();
+        let unique: std::collections::HashSet<u64> = hashes.iter().copied().collect();
+        assert_eq!(unique.len(), inputs.len());
+    }
+
+    #[test]
+    fn test_add_rate_limit_headers_sets_correct_values() {
+        let result = RateLimitResult {
+            allowed: true,
+            current: 5,
+            limit: 30,
+            reset_secs: 45,
+        };
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        add_rate_limit_headers(&mut response, &result);
+
+        let headers = response.headers();
+        assert_eq!(headers.get("X-RateLimit-Limit").unwrap(), "30");
+        assert_eq!(headers.get("X-RateLimit-Remaining").unwrap(), "25");
+        assert_eq!(headers.get("X-RateLimit-Reset").unwrap(), "45");
+    }
+
+    #[test]
+    fn test_rate_limited_response_is_429() {
+        let result = RateLimitResult {
+            allowed: false,
+            current: 30,
+            limit: 30,
+            reset_secs: 12,
+        };
+        let response = rate_limited_response(&result);
+        assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().get("Retry-After").is_some());
+    }
+
+    // --- Redis Lua script tests (testcontainers) ---
+
+    #[tokio::test]
+    async fn test_sliding_window_allows_under_limit() {
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = format!("redis://127.0.0.1:{port}");
+        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
+        let cache = CacheManager::new(pool);
+
+        let result = check_rate_limit_inner(&cache, "rl:test:allow", 10, 60).await;
+        assert!(result.allowed);
+        assert_eq!(result.current, 1);
+        assert_eq!(result.limit, 10);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_window_blocks_over_limit() {
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = format!("redis://127.0.0.1:{port}");
+        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
+        let cache = CacheManager::new(pool);
+
+        // Exhaust the limit of 3
+        for _ in 0..3 {
+            check_rate_limit_inner(&cache, "rl:test:block", 3, 60).await;
+        }
+
+        let result = check_rate_limit_inner(&cache, "rl:test:block", 3, 60).await;
+        assert!(!result.allowed);
+        assert_eq!(result.current, 3);
+    }
+
+    #[tokio::test]
+    async fn test_sliding_window_fails_open_on_redis_unavailable() {
+        // Point at a port with no Redis — cache ops degrade gracefully
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = "redis://127.0.0.1:19999".to_string();
+        // bb8 pool with fast timeout so the test doesn't hang
+        let manager =
+            bb8_redis::RedisConnectionManager::new(config.redis_url.as_str()).unwrap();
+        let pool = bb8::Pool::builder()
+            .connection_timeout(std::time::Duration::from_millis(100))
+            .build(manager)
+            .await
+            .unwrap();
+        let cache = CacheManager::new(pool);
+
+        let result = check_rate_limit_inner(&cache, "rl:test:failopen", 10, 60).await;
+        // Must fail open (allow) — never drop legitimate traffic when Redis is down
+        assert!(result.allowed);
+    }
 }
