@@ -61,7 +61,7 @@ services:
       RUST_LOG: social_api=info,tower_http=info
       LOG_LEVEL: info
     ports:
-      - "9080:8080"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy

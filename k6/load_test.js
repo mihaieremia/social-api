@@ -5,7 +5,7 @@ import { check } from 'k6';
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:9080';
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 
 // Filter to run a single scenario: K6_SCENARIO=read_path k6 run k6/load_test.js
 const ONLY_SCENARIO = __ENV.K6_SCENARIO || '';
