@@ -1,0 +1,449 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: social-api-critical
+    folder: Social API
+    interval: 1m
+    rules:
+      - uid: high-error-rate
+        title: "High Error Rate"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_http_requests_total{status=~"5.."}[5m]))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_http_requests_total[5m]))
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "($A / $B) * 100"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx error rate exceeds 2% over 5 minutes"
+          dashboard_row: "HTTP Traffic"
+
+      - uid: critical-latency-p99
+        title: "Critical Latency P99"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.25]
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "P99 latency exceeds 250ms for 2 minutes"
+          dashboard_row: "HTTP Traffic"
+
+      - uid: circuit-breaker-open
+        title: "Circuit Breaker Open"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: social_api_circuit_breaker_state == 2
+              instant: true
+              refId: A
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker is OPEN — external dependency is down"
+          dashboard_row: "External Dependencies"
+
+  - orgId: 1
+    name: social-api-warning
+    folder: Social API
+    interval: 1m
+    rules:
+      - uid: elevated-latency-p95
+        title: "Elevated Latency P95"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.05]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 latency exceeds 50ms for 3 minutes"
+
+      - uid: elevated-latency-p99
+        title: "Elevated Latency P99"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.1]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 latency exceeds 100ms for 3 minutes"
+
+      - uid: cache-error-spike
+        title: "Cache Error Spike"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_cache_operations_total{result="error"}[5m]))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_cache_operations_total[5m]))
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A / $B"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.05]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache error rate exceeds 5% over 5 minutes"
+
+      - uid: low-cache-hit-rate
+        title: "Low Cache Hit Rate"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_cache_operations_total{result="hit"}[10m]))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_cache_operations_total{result=~"hit|miss"}[10m]))
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A / $B"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [0.9]
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit rate below 90% over 10 minutes"
+
+      - uid: external-call-failures
+        title: "External Call Failures"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_external_calls_total{status="error"}[5m]))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_external_calls_total[5m]))
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A / $B"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.1]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External call error rate exceeds 10% over 5 minutes"
+
+      - uid: external-call-latency
+        title: "External Call Latency"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.99, sum(rate(social_api_external_call_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.2]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External call P99 latency exceeds 200ms for 3 minutes"
+
+      - uid: high-sse-connections
+        title: "High SSE Connections"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: social_api_sse_connections_active
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [500]
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active SSE connections exceed 500"
+
+      - uid: postgres-high-connections
+        title: "PostgreSQL High Connections"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: pg_stat_activity_count
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [80]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL active connections exceed 80"
+
+      - uid: redis-high-memory
+        title: "Redis High Memory"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: redis_memory_used_bytes
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: redis_memory_max_bytes
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$A / $B"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.8]
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory usage exceeds 80%"
+
+contactPoints:
+  - orgId: 1
+    name: default
+    receivers:
+      - uid: default-email
+        type: email
+        settings:
+          addresses: admin@localhost
+          singleEmail: true
+
+policies:
+  - orgId: 1
+    receiver: default
+    group_by: ["alertname", "severity"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

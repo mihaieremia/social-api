@@ -69,6 +69,43 @@ The k6 checks treat HTTP 429 (rate limited) as a valid response, so the test
 will still pass even with aggressive rate limits — only latency thresholds will
 be evaluated on successful requests.
 
+## Baseline Results (2026-03-05)
+
+Environment: Docker Compose on macOS (Apple Silicon), single machine.
+All 5 thresholds passed. Zero failures across 929,991 requests.
+
+### Thresholds
+
+| Threshold | Target | Actual | Status |
+|-----------|--------|--------|--------|
+| read_path p99 | < 10ms | 1.45ms | PASS |
+| batch_path p99 | < 50ms | 2.01ms | PASS |
+| write_path p99 | < 100ms | 2.39ms | PASS |
+| mixed p99 | < 100ms | 1.63ms | PASS |
+| Error rate | < 1% | 0.00% | PASS |
+
+### Latency
+
+| Scenario | Rate | avg | med | p90 | p95 | p99 | max |
+|----------|------|-----|-----|-----|-----|-----|-----|
+| read_path | 10k rps | 601us | 571us | 704us | 777us | 1.45ms | 25ms |
+| batch_path | 1k rps | 700us | 598us | 774us | 956us | 2.01ms | 71ms |
+| write_path | 500 rps | 1.4ms | 1.4ms | 1.72ms | 1.86ms | 2.39ms | 16ms |
+| mixed (80/15/5) | 2k rps | 462us | 421us | 590us | 833us | 1.63ms | 9.5ms |
+
+### Summary
+
+| Metric | Value |
+|--------|-------|
+| Total requests | 929,991 |
+| Sustained throughput | 2,818 req/s |
+| Checks passed | 1,859,982 / 1,859,982 (100%) |
+| Data received | 736 MB |
+| Data sent | 513 MB |
+| Dropped iterations | 10 (0.001%) |
+| Max VUs used | 13 of 210 allocated |
+| Duration | 5m30s |
+
 ## Notes
 
 - Uses `constant-arrival-rate` executor to guarantee exact rps regardless of response time.
