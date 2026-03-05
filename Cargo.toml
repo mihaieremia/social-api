@@ -54,5 +54,7 @@ utoipa = { version = "5", features = ["chrono", "uuid"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
+dashmap = "6"
+
 # Shared crate
 shared = { path = "crates/shared" }
