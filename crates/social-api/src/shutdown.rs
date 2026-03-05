@@ -41,3 +41,57 @@ pub fn install_signal_handler() -> CancellationToken {
 
     token
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_install_signal_handler_returns_token() {
+        // install_signal_handler() spawns a background task and returns a CancellationToken.
+        // We verify it returns a valid token and that it is not yet cancelled.
+        let token = install_signal_handler();
+        assert!(!token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_token_cancel() {
+        // Verify that a CancellationToken can be cancelled and the state is observable.
+        // (This tests the underlying tokio_util behavior used by install_signal_handler)
+        let token = install_signal_handler();
+        assert!(!token.is_cancelled());
+
+        // The signal handler task is running in the background — we can cancel the token
+        // programmatically to test the cancellation path.
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_token_clone_shares_cancellation() {
+        let token = install_signal_handler();
+        let token_clone = token.clone();
+
+        assert!(!token.is_cancelled());
+        assert!(!token_clone.is_cancelled());
+
+        token.cancel();
+
+        assert!(token.is_cancelled());
+        assert!(token_clone.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_future_resolves_immediately() {
+        let token = install_signal_handler();
+        token.cancel();
+
+        // cancelled() should resolve immediately when already cancelled
+        let completed = tokio::time::timeout(Duration::from_millis(100), token.cancelled())
+            .await
+            .is_ok();
+
+        assert!(completed, "cancelled() should resolve immediately after cancel()");
+    }
+}

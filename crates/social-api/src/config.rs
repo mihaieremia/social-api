@@ -142,8 +142,7 @@ impl Config {
         self.content_api_urls.get(content_type).map(|s| s.as_str())
     }
 
-    /// Minimal config for unit tests — does NOT read environment variables.
-    #[cfg(test)]
+    /// Minimal config for unit/integration tests — does NOT read environment variables.
     pub fn new_for_test() -> Self {
         let mut content_api_urls = std::collections::HashMap::new();
         content_api_urls.insert("post".to_string(), "http://localhost:8081".to_string());
@@ -267,5 +266,275 @@ mod tests {
         let result: u32 = env_or_default("__TEST_INVALID_VAR__", 42);
         assert_eq!(result, 42);
         unsafe { env::remove_var("__TEST_INVALID_VAR__") };
+    }
+
+    #[test]
+    fn test_is_valid_content_type_known() {
+        let config = Config::new_for_test();
+        assert!(config.is_valid_content_type("post"));
+        assert!(config.is_valid_content_type("bonus_hunter"));
+        assert!(config.is_valid_content_type("top_picks"));
+    }
+
+    #[test]
+    fn test_is_valid_content_type_unknown() {
+        let config = Config::new_for_test();
+        assert!(!config.is_valid_content_type("nonexistent_xyz"));
+    }
+
+    #[test]
+    fn test_content_api_url_returns_url_for_known_type() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_url("post").is_some());
+        assert_eq!(config.content_api_url("post"), Some("http://localhost:8081"));
+    }
+
+    #[test]
+    fn test_content_api_url_returns_none_for_unknown() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_url("totally_unknown_type").is_none());
+    }
+
+    #[test]
+    fn test_env_or_default_with_valid_value() {
+        unsafe { std::env::set_var("__TEST_VALID_U32_COVERAGE__", "99") };
+        let result: u32 = env_or_default("__TEST_VALID_U32_COVERAGE__", 0);
+        assert_eq!(result, 99);
+        unsafe { std::env::remove_var("__TEST_VALID_U32_COVERAGE__") };
+    }
+
+    #[test]
+    fn test_new_for_test_has_all_content_types() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_urls.contains_key("post"));
+        assert!(config.content_api_urls.contains_key("bonus_hunter"));
+        assert!(config.content_api_urls.contains_key("top_picks"));
+        assert_eq!(config.content_api_urls.len(), 3);
+    }
+
+    #[test]
+    fn test_new_for_test_defaults() {
+        let config = Config::new_for_test();
+        assert_eq!(config.http_port, 8080);
+        assert_eq!(config.rate_limit_write_per_minute, 30);
+        assert_eq!(config.rate_limit_read_per_minute, 1000);
+    }
+
+    #[test]
+    fn test_require_env_returns_empty_and_records_missing() {
+        let mut missing: Vec<&str> = Vec::new();
+        let val = require_env("__MISSING_VAR_COVERAGE_TEST__", &mut missing);
+        assert_eq!(val, "");
+        assert_eq!(missing, vec!["__MISSING_VAR_COVERAGE_TEST__"]);
+    }
+
+    #[test]
+    fn test_require_env_with_empty_string_value() {
+        unsafe { env::set_var("__EMPTY_VAR_COVERAGE_TEST__", "") };
+        let mut missing: Vec<&str> = Vec::new();
+        let val = require_env("__EMPTY_VAR_COVERAGE_TEST__", &mut missing);
+        assert_eq!(val, "");
+        assert_eq!(missing, vec!["__EMPTY_VAR_COVERAGE_TEST__"]);
+        unsafe { env::remove_var("__EMPTY_VAR_COVERAGE_TEST__") };
+    }
+
+    #[test]
+    fn test_require_env_with_present_value() {
+        unsafe { env::set_var("__PRESENT_VAR_COVERAGE_TEST__", "hello") };
+        let mut missing: Vec<&str> = Vec::new();
+        let val = require_env("__PRESENT_VAR_COVERAGE_TEST__", &mut missing);
+        assert_eq!(val, "hello");
+        assert!(missing.is_empty());
+        unsafe { env::remove_var("__PRESENT_VAR_COVERAGE_TEST__") };
+    }
+
+    #[test]
+    fn test_build_content_api_urls_known_types() {
+        unsafe {
+            env::set_var("CONTENT_API_POST_URL", "http://post-api");
+            env::set_var("CONTENT_API_BONUS_HUNTER_URL", "http://bonus-api");
+            env::set_var("CONTENT_API_TOP_PICKS_URL", "http://top-picks-api");
+        }
+        let urls = build_content_api_urls();
+        assert_eq!(urls.get("post"), Some(&"http://post-api".to_string()));
+        assert_eq!(
+            urls.get("bonus_hunter"),
+            Some(&"http://bonus-api".to_string())
+        );
+        assert_eq!(
+            urls.get("top_picks"),
+            Some(&"http://top-picks-api".to_string())
+        );
+        unsafe {
+            env::remove_var("CONTENT_API_POST_URL");
+            env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
+            env::remove_var("CONTENT_API_TOP_PICKS_URL");
+        }
+    }
+
+    #[test]
+    fn test_build_content_api_urls_unknown_extra_type() {
+        unsafe {
+            env::set_var("CONTENT_API_NEWS_ARTICLE_URL", "http://news-api");
+        }
+        let urls = build_content_api_urls();
+        assert!(
+            urls.contains_key("news_article"),
+            "Expected news_article key from CONTENT_API_NEWS_ARTICLE_URL"
+        );
+        assert_eq!(
+            urls.get("news_article"),
+            Some(&"http://news-api".to_string())
+        );
+        unsafe {
+            env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
+        }
+    }
+
+    #[test]
+    fn test_build_content_api_urls_empty_value_not_inserted() {
+        unsafe {
+            env::set_var("CONTENT_API_POST_URL", "");
+        }
+        let urls = build_content_api_urls();
+        // Empty value should not be inserted
+        assert!(!urls.contains_key("post"));
+        unsafe {
+            env::remove_var("CONTENT_API_POST_URL");
+        }
+    }
+
+    #[test]
+    fn test_from_env_success() {
+        unsafe {
+            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("HTTP_PORT", "8080");
+            env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
+            // Override optional settings too
+            env::set_var("DB_MAX_CONNECTIONS", "10");
+            env::set_var("DB_MIN_CONNECTIONS", "2");
+            env::set_var("DB_ACQUIRE_TIMEOUT_SECS", "3");
+            env::set_var("REDIS_POOL_SIZE", "5");
+            env::set_var("RATE_LIMIT_WRITE_PER_MINUTE", "60");
+            env::set_var("RATE_LIMIT_READ_PER_MINUTE", "2000");
+            env::set_var("CACHE_TTL_LIKE_COUNTS_SECS", "600");
+            env::set_var("CACHE_TTL_CONTENT_VALIDATION_SECS", "7200");
+            env::set_var("CACHE_TTL_USER_STATUS_SECS", "120");
+            env::set_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "3");
+            env::set_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS", "15");
+            env::set_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD", "2");
+            env::set_var("SHUTDOWN_TIMEOUT_SECS", "20");
+            env::set_var("SSE_HEARTBEAT_INTERVAL_SECS", "10");
+            env::set_var("SSE_BROADCAST_CAPACITY", "128");
+            env::set_var("LEADERBOARD_REFRESH_INTERVAL_SECS", "30");
+            env::set_var("LOG_LEVEL", "debug");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.http_port, 8080);
+        assert_eq!(config.database_url, "postgres://x:x@localhost/x");
+        assert_eq!(config.read_database_url, "postgres://x:x@localhost/x");
+        assert_eq!(config.redis_url, "redis://localhost");
+        assert_eq!(config.profile_api_url, "http://localhost:8081");
+        assert!(config.content_api_urls.contains_key("post"));
+        assert_eq!(config.db_max_connections, 10);
+        assert_eq!(config.db_min_connections, 2);
+        assert_eq!(config.db_acquire_timeout_secs, 3);
+        assert_eq!(config.redis_pool_size, 5);
+        assert_eq!(config.rate_limit_write_per_minute, 60);
+        assert_eq!(config.rate_limit_read_per_minute, 2000);
+        assert_eq!(config.cache_ttl_like_counts_secs, 600);
+        assert_eq!(config.cache_ttl_content_validation_secs, 7200);
+        assert_eq!(config.circuit_breaker_failure_threshold, 3);
+        assert_eq!(config.circuit_breaker_recovery_timeout_secs, 15);
+        assert_eq!(config.circuit_breaker_success_threshold, 2);
+        assert_eq!(config.shutdown_timeout_secs, 20);
+        assert_eq!(config.sse_heartbeat_interval_secs, 10);
+        assert_eq!(config.sse_broadcast_capacity, 128);
+        assert_eq!(config.leaderboard_refresh_interval_secs, 30);
+        assert_eq!(config.log_level, "debug");
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("READ_DATABASE_URL");
+            env::remove_var("REDIS_URL");
+            env::remove_var("HTTP_PORT");
+            env::remove_var("PROFILE_API_URL");
+            env::remove_var("CONTENT_API_POST_URL");
+            env::remove_var("DB_MAX_CONNECTIONS");
+            env::remove_var("DB_MIN_CONNECTIONS");
+            env::remove_var("DB_ACQUIRE_TIMEOUT_SECS");
+            env::remove_var("REDIS_POOL_SIZE");
+            env::remove_var("RATE_LIMIT_WRITE_PER_MINUTE");
+            env::remove_var("RATE_LIMIT_READ_PER_MINUTE");
+            env::remove_var("CACHE_TTL_LIKE_COUNTS_SECS");
+            env::remove_var("CACHE_TTL_CONTENT_VALIDATION_SECS");
+            env::remove_var("CACHE_TTL_USER_STATUS_SECS");
+            env::remove_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD");
+            env::remove_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS");
+            env::remove_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD");
+            env::remove_var("SHUTDOWN_TIMEOUT_SECS");
+            env::remove_var("SSE_HEARTBEAT_INTERVAL_SECS");
+            env::remove_var("SSE_BROADCAST_CAPACITY");
+            env::remove_var("LEADERBOARD_REFRESH_INTERVAL_SECS");
+            env::remove_var("LOG_LEVEL");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing required environment variables")]
+    fn test_from_env_panics_on_missing_required_vars() {
+        // Ensure required vars are not set
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("READ_DATABASE_URL");
+            env::remove_var("REDIS_URL");
+            env::remove_var("HTTP_PORT");
+            env::remove_var("PROFILE_API_URL");
+        }
+        Config::from_env();
+    }
+
+    #[test]
+    #[should_panic(expected = "HTTP_PORT must be a valid port number")]
+    fn test_from_env_panics_on_invalid_http_port() {
+        unsafe {
+            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("HTTP_PORT", "not_a_port");
+            env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
+        }
+        let _config = Config::from_env();
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("READ_DATABASE_URL");
+            env::remove_var("REDIS_URL");
+            env::remove_var("HTTP_PORT");
+            env::remove_var("PROFILE_API_URL");
+            env::remove_var("CONTENT_API_POST_URL");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "No content API URLs configured")]
+    fn test_from_env_panics_when_no_content_api_urls() {
+        unsafe {
+            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            env::set_var("REDIS_URL", "redis://localhost");
+            env::set_var("HTTP_PORT", "8080");
+            env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            // Intentionally NOT setting any CONTENT_API_*_URL vars
+            env::remove_var("CONTENT_API_POST_URL");
+            env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
+            env::remove_var("CONTENT_API_TOP_PICKS_URL");
+            env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
+        }
+        Config::from_env();
     }
 }

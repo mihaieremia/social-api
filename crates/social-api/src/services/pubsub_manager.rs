@@ -232,3 +232,136 @@ async fn run_single_connection(
 
     exit_reason
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers::runners::AsyncRunner;
+
+    /// Start a Redis testcontainer and return a PubSubManager + the URL + the container.
+    /// The container must be kept alive for the duration of the test.
+    async fn make_manager() -> (
+        PubSubManager,
+        String,
+        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+    ) {
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("redis container");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let redis_url = format!("redis://127.0.0.1:{port}");
+        let mgr = PubSubManager::new(redis_url.clone(), 16);
+        (mgr, redis_url, redis)
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_and_receive_message() {
+        let (mgr, redis_url, _redis) = make_manager().await;
+        let channel = "test:pubsub:recv";
+
+        let mut rx = mgr.subscribe(channel).await.expect("subscribe");
+
+        // Give the bridge task time to connect to Redis
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Publish a message via a separate redis::Client
+        let client = redis::Client::open(redis_url.as_str()).expect("client open");
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connection");
+        let _: i64 = redis::cmd("PUBLISH")
+            .arg(channel)
+            .arg("hello-pubsub")
+            .query_async(&mut conn)
+            .await
+            .expect("publish");
+
+        // Wait up to 2 seconds for the message to arrive
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("recv error");
+
+        assert_eq!(received, "hello-pubsub");
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_same_channel_reuses_bridge() {
+        // This test verifies the DashMap channel-reuse logic.
+        // We use a real Redis container so the bridge can connect and stay alive
+        // long enough for the second subscribe to hit the fast path.
+        let (mgr, _redis_url, _redis) = make_manager().await;
+        let channel = "test:pubsub:reuse";
+
+        let _rx1 = mgr.subscribe(channel).await.expect("subscribe 1");
+        // Give the bridge task a moment to connect before the second subscribe
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _rx2 = mgr.subscribe(channel).await.expect("subscribe 2");
+
+        // Both subscribers share a single bridge — only one channel entry.
+        assert_eq!(mgr.active_channels(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_different_channels_create_separate_bridges() {
+        // No real Redis needed: subscribe() always succeeds (bridge reconnects in bg).
+        let mgr = PubSubManager::new("redis://127.0.0.1:19998".to_string(), 16);
+
+        let _rx1 = mgr.subscribe("test:pubsub:ch1").await.expect("subscribe ch1");
+        let _rx2 = mgr.subscribe("test:pubsub:ch2").await.expect("subscribe ch2");
+
+        assert_eq!(mgr.active_channels(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_bad_redis_url_does_not_panic() {
+        // A bad URL means the bridge background task will fail to connect,
+        // but subscribe() itself must return Ok (bridge reconnects in the background).
+        let mgr = PubSubManager::new("redis://127.0.0.1:19996".to_string(), 16);
+        let result = mgr.subscribe("test:bad").await;
+        assert!(result.is_ok(), "subscribe should not panic on bad URL");
+    }
+
+    #[tokio::test]
+    async fn test_active_channels_starts_at_zero() {
+        let mgr = PubSubManager::new("redis://127.0.0.1:19997".to_string(), 16);
+        assert_eq!(mgr.active_channels(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_messages_delivered_in_order() {
+        let (mgr, redis_url, _redis) = make_manager().await;
+        let channel = "test:pubsub:ordered";
+
+        let mut rx = mgr.subscribe(channel).await.expect("subscribe");
+
+        // Give bridge time to connect
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let client = redis::Client::open(redis_url.as_str()).expect("client open");
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connection");
+
+        for i in 0u32..3 {
+            let _: i64 = redis::cmd("PUBLISH")
+                .arg(channel)
+                .arg(format!("msg-{i}"))
+                .query_async(&mut conn)
+                .await
+                .expect("publish");
+        }
+
+        let timeout = std::time::Duration::from_secs(3);
+        for i in 0u32..3 {
+            let msg = tokio::time::timeout(timeout, rx.recv())
+                .await
+                .expect("timed out")
+                .expect("recv error");
+            assert_eq!(msg, format!("msg-{i}"));
+        }
+    }
+}

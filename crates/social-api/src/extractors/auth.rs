@@ -6,7 +6,6 @@ use axum::{
 use shared::errors::{ApiError, AppError, ErrorCode};
 use shared::types::AuthenticatedUser;
 
-use crate::clients::profile_client::TokenValidator;
 use crate::state::AppState;
 
 /// Extractor that validates Bearer token and provides AuthenticatedUser.

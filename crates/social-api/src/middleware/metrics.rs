@@ -112,4 +112,36 @@ mod tests {
         let path = "/health/ready";
         assert_eq!(normalize_path(path), "/health/ready");
     }
+
+    #[test]
+    fn test_normalize_path_numeric_id() {
+        // Numeric IDs should also be replaced with :id
+        let path = "/v1/items/12345/details";
+        assert_eq!(normalize_path(path), "/v1/items/:id/details");
+    }
+
+    #[test]
+    fn test_normalize_path_root() {
+        let path = "/";
+        assert_eq!(normalize_path(path), "/");
+    }
+
+    #[test]
+    fn test_normalize_path_metrics() {
+        let path = "/metrics";
+        assert_eq!(normalize_path(path), "/metrics");
+    }
+
+    #[test]
+    fn test_normalize_path_multiple_uuids() {
+        let path =
+            "/v1/likes/731b0395-4888-4822-b516-05b4b7bf2089/731b0395-4888-4822-b516-05b4b7bf2089";
+        assert_eq!(normalize_path(path), "/v1/likes/:id/:id");
+    }
+
+    #[test]
+    fn test_normalize_path_stream_with_uuid() {
+        let path = "/v1/likes/stream/post/731b0395-4888-4822-b516-05b4b7bf2089";
+        assert_eq!(normalize_path(path), "/v1/likes/stream/post/:id");
+    }
 }

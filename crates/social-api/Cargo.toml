@@ -8,6 +8,10 @@ license.workspace = true
 name = "social-api"
 path = "src/main.rs"
 
+[lib]
+name = "social_api"
+path = "src/lib.rs"
+
 [dependencies]
 shared = { workspace = true }
 
@@ -66,3 +70,4 @@ testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 # sqlx re-declared to satisfy Cargo; no extra features needed beyond what [dependencies] already enables
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
+http-body-util = "0.1"

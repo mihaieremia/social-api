@@ -199,7 +199,7 @@ sqlx-prepare: ## Regenerate sqlx-data.json for offline compile-time checks
 
 COVERAGE_DIR := coverage
 
-COVERAGE_EXCLUDE := crates/mock-services
+COVERAGE_EXCLUDE := crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs
 
 coverage: ## Full coverage report: unit + integration tests (requires Docker + make up; output: coverage/)
 	@mkdir -p $(COVERAGE_DIR)

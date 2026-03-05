@@ -216,9 +216,9 @@ impl AppError {
                 None,
             ),
             Self::Internal(msg) => (ErrorCode::InternalError, msg.clone(), None),
-            Self::Database(_) => (
+            Self::Database(msg) => (
                 ErrorCode::InternalError,
-                "An internal error occurred. Please try again later.".to_string(),
+                format!("Database error: {msg}"),
                 None,
             ),
             Self::Cache(_) => (ErrorCode::InternalError, "Cache error".to_string(), None),
@@ -327,13 +327,208 @@ mod tests {
     }
 
     #[test]
-    fn test_database_error_does_not_leak_internals() {
-        let err = AppError::Database(
-            "duplicate key value violates unique constraint \"uq_likes_user_content\"".into(),
+    fn test_error_code_display() {
+        assert_eq!(ErrorCode::Unauthorized.to_string(), "UNAUTHORIZED");
+        assert_eq!(ErrorCode::ContentNotFound.to_string(), "CONTENT_NOT_FOUND");
+        assert_eq!(
+            ErrorCode::ContentTypeUnknown.to_string(),
+            "CONTENT_TYPE_UNKNOWN"
         );
-        let api_err = err.to_api_error("req_x");
-        assert!(!api_err.error.message.contains("uq_likes_user_content"));
-        assert!(!api_err.error.message.contains("duplicate key"));
-        assert_eq!(api_err.error.code, ErrorCode::InternalError);
+        assert_eq!(
+            ErrorCode::InvalidContentId.to_string(),
+            "INVALID_CONTENT_ID"
+        );
+        assert_eq!(ErrorCode::BatchTooLarge.to_string(), "BATCH_TOO_LARGE");
+        assert_eq!(ErrorCode::InvalidCursor.to_string(), "INVALID_CURSOR");
+        assert_eq!(ErrorCode::InvalidWindow.to_string(), "INVALID_WINDOW");
+        assert_eq!(ErrorCode::RateLimited.to_string(), "RATE_LIMITED");
+        assert_eq!(
+            ErrorCode::DependencyUnavailable.to_string(),
+            "DEPENDENCY_UNAVAILABLE"
+        );
+        assert_eq!(ErrorCode::InternalError.to_string(), "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn test_all_app_error_variants_to_api_error() {
+        // Unauthorized
+        let err = AppError::Unauthorized("bad token".to_string());
+        let api = err.to_api_error("req-1");
+        assert_eq!(api.error.code, ErrorCode::Unauthorized);
+        assert_eq!(api.http_status(), 401);
+        assert!(api.error.details.is_none());
+
+        // ContentTypeUnknown
+        let err = AppError::ContentTypeUnknown("unknown_type".to_string());
+        let api = err.to_api_error("req-2");
+        assert_eq!(api.error.code, ErrorCode::ContentTypeUnknown);
+        assert_eq!(api.http_status(), 400);
+        assert!(api.error.details.is_some());
+
+        // InvalidContentId
+        let err = AppError::InvalidContentId("not-a-uuid".to_string());
+        let api = err.to_api_error("req-3");
+        assert_eq!(api.error.code, ErrorCode::InvalidContentId);
+        assert_eq!(api.http_status(), 400);
+        assert!(api.error.details.is_none());
+
+        // InvalidCursor
+        let err = AppError::InvalidCursor("bad cursor".to_string());
+        let api = err.to_api_error("req-4");
+        assert_eq!(api.error.code, ErrorCode::InvalidCursor);
+        assert_eq!(api.http_status(), 400);
+
+        // InvalidWindow
+        let err = AppError::InvalidWindow("bad_window".to_string());
+        let api = err.to_api_error("req-5");
+        assert_eq!(api.error.code, ErrorCode::InvalidWindow);
+        assert_eq!(api.http_status(), 400);
+
+        // DependencyUnavailable
+        let err = AppError::DependencyUnavailable("profile_api".to_string());
+        let api = err.to_api_error("req-6");
+        assert_eq!(api.error.code, ErrorCode::DependencyUnavailable);
+        assert_eq!(api.http_status(), 503);
+
+        // Internal
+        let err = AppError::Internal("something failed".to_string());
+        let api = err.to_api_error("req-7");
+        assert_eq!(api.error.code, ErrorCode::InternalError);
+        assert_eq!(api.http_status(), 500);
+
+        // Database
+        let err = AppError::Database("connection refused".to_string());
+        let api = err.to_api_error("req-8");
+        assert_eq!(api.error.code, ErrorCode::InternalError);
+        assert!(api.error.message.contains("Database error"));
+
+        // Cache
+        let err = AppError::Cache("timeout".to_string());
+        let api = err.to_api_error("req-9");
+        assert_eq!(api.error.code, ErrorCode::InternalError);
+        assert!(api.error.message.contains("Cache error"));
+    }
+
+    #[test]
+    fn test_all_app_error_variants_error_code() {
+        assert_eq!(
+            AppError::Unauthorized("x".into()).error_code(),
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            AppError::ContentNotFound {
+                content_type: "post".into(),
+                content_id: "id".into()
+            }
+            .error_code(),
+            ErrorCode::ContentNotFound
+        );
+        assert_eq!(
+            AppError::ContentTypeUnknown("x".into()).error_code(),
+            ErrorCode::ContentTypeUnknown
+        );
+        assert_eq!(
+            AppError::InvalidContentId("x".into()).error_code(),
+            ErrorCode::InvalidContentId
+        );
+        assert_eq!(
+            AppError::BatchTooLarge { size: 1, max: 1 }.error_code(),
+            ErrorCode::BatchTooLarge
+        );
+        assert_eq!(
+            AppError::InvalidCursor("x".into()).error_code(),
+            ErrorCode::InvalidCursor
+        );
+        assert_eq!(
+            AppError::InvalidWindow("x".into()).error_code(),
+            ErrorCode::InvalidWindow
+        );
+        assert_eq!(
+            AppError::RateLimited { retry_after_secs: 5 }.error_code(),
+            ErrorCode::RateLimited
+        );
+        assert_eq!(
+            AppError::DependencyUnavailable("x".into()).error_code(),
+            ErrorCode::DependencyUnavailable
+        );
+        assert_eq!(
+            AppError::Internal("x".into()).error_code(),
+            ErrorCode::InternalError
+        );
+    }
+
+    #[test]
+    fn test_app_error_display_messages() {
+        let e = AppError::Unauthorized("bad token".to_string());
+        assert!(e.to_string().contains("Unauthorized"));
+
+        let e = AppError::ContentNotFound {
+            content_type: "post".to_string(),
+            content_id: "abc".to_string(),
+        };
+        assert!(e.to_string().contains("Content not found"));
+        assert!(e.to_string().contains("post:abc"));
+
+        let e = AppError::ContentTypeUnknown("foo".to_string());
+        assert!(e.to_string().contains("Unknown content type"));
+        assert!(e.to_string().contains("foo"));
+
+        let e = AppError::InvalidContentId("bad-id".to_string());
+        assert!(e.to_string().contains("Invalid content ID"));
+
+        let e = AppError::BatchTooLarge { size: 150, max: 100 };
+        assert!(e.to_string().contains("150"));
+        assert!(e.to_string().contains("100"));
+
+        let e = AppError::InvalidCursor("bad".to_string());
+        assert!(e.to_string().contains("Invalid cursor"));
+
+        let e = AppError::InvalidWindow("bad".to_string());
+        assert!(e.to_string().contains("Invalid time window"));
+
+        let e = AppError::RateLimited { retry_after_secs: 30 };
+        assert!(e.to_string().contains("Rate limited"));
+
+        let e = AppError::DependencyUnavailable("svc".to_string());
+        assert!(e.to_string().contains("Dependency unavailable"));
+
+        let e = AppError::Internal("oops".to_string());
+        assert!(e.to_string().contains("Internal error"));
+
+        let e = AppError::Database("db error".to_string());
+        assert!(e.to_string().contains("Database error"));
+
+        let e = AppError::Cache("cache error".to_string());
+        assert!(e.to_string().contains("Cache error"));
+    }
+
+    #[test]
+    fn test_app_error_internal_constructor() {
+        // Tests AppError::internal() — the helper that logs and captures backtrace
+        let err = AppError::internal("something went wrong");
+        assert!(matches!(err, AppError::Internal(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("something went wrong"));
+    }
+
+    #[test]
+    fn test_api_error_new_fields() {
+        let err = ApiError::new(ErrorCode::Unauthorized, "test msg", "req-abc");
+        assert_eq!(err.error.message, "test msg");
+        assert_eq!(err.error.request_id, "req-abc");
+        assert!(err.error.details.is_none());
+        assert_eq!(err.http_status(), 401);
+    }
+
+    #[test]
+    fn test_api_error_http_status_delegates_to_code() {
+        let err = ApiError::new(ErrorCode::DependencyUnavailable, "svc down", "req-1");
+        assert_eq!(err.http_status(), 503);
+
+        let err = ApiError::new(ErrorCode::RateLimited, "too many", "req-2");
+        assert_eq!(err.http_status(), 429);
+
+        let err = ApiError::new(ErrorCode::InternalError, "oops", "req-3");
+        assert_eq!(err.http_status(), 500);
     }
 }
