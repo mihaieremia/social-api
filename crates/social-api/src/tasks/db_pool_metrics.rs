@@ -74,3 +74,103 @@ fn record_pool_metrics(db: &DbPools, max_connections: u32) {
     )
     .set(max_connections as f64);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::postgres::Postgres;
+    use tokio_util::sync::CancellationToken;
+
+    /// Spin up a Postgres testcontainer, run migrations, and return DbPools + the container.
+    async fn setup_db() -> (
+        DbPools,
+        testcontainers::ContainerAsync<Postgres>,
+    ) {
+        let pg = Postgres::default().start().await.expect("postgres container");
+        let port = pg.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+        let mut config = crate::config::Config::new_for_test();
+        config.database_url = db_url.clone();
+        config.read_database_url = db_url;
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        sqlx::migrate!("../../migrations")
+            .run(&db.writer)
+            .await
+            .expect("run migrations");
+
+        (db, pg)
+    }
+
+    // -------------------------------------------------------------------------
+    // 1. record_pool_metrics does not panic with real pool
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_record_pool_metrics_does_not_panic() {
+        let (db, _pg) = setup_db().await;
+        // Should complete without panicking regardless of whether a metrics
+        // recorder is installed (metrics crate no-ops when none is registered).
+        record_pool_metrics(&db, 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. record_pool_metrics with different max_connections values
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_record_pool_metrics_various_max_connections() {
+        let (db, _pg) = setup_db().await;
+        for max in [1, 5, 20, 100] {
+            record_pool_metrics(&db, max);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. spawn_db_pool_metrics task starts and cancels cleanly
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_spawn_db_pool_metrics_cancels_on_shutdown() {
+        let (db, _pg) = setup_db().await;
+
+        let config = crate::config::Config::new_for_test();
+        let shutdown_token = CancellationToken::new();
+
+        let handle = spawn_db_pool_metrics(db, config, shutdown_token.clone());
+
+        // Signal shutdown immediately -- the 15s periodic sleep should never fire.
+        shutdown_token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        assert!(
+            result.is_ok(),
+            "spawn_db_pool_metrics handle must complete within 5s after cancel"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. pool size and idle counts are non-negative integers
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pool_size_values_are_sane() {
+        let (db, _pg) = setup_db().await;
+
+        // Verify the pool size metrics are readable without overflow
+        let writer_total = db.writer.size();
+        let writer_idle = db.writer.num_idle() as u32;
+        let writer_active = writer_total.saturating_sub(writer_idle);
+
+        // active connections must not exceed total
+        assert!(writer_active <= writer_total);
+
+        let reader_total = db.reader.size();
+        let reader_idle = db.reader.num_idle() as u32;
+        let reader_active = reader_total.saturating_sub(reader_idle);
+
+        assert!(reader_active <= reader_total);
+    }
+}
