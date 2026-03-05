@@ -60,8 +60,13 @@ impl DbPools {
         Ok(())
     }
 
-    /// Check if the database is reachable (for health checks).
+    /// Check if BOTH writer and reader pools are reachable.
+    /// A broken read replica must fail the readiness probe — reads would be broken.
     pub async fn is_healthy(&self) -> bool {
-        sqlx::query("SELECT 1").execute(&self.writer).await.is_ok()
+        let (writer_ok, reader_ok) = tokio::join!(
+            sqlx::query("SELECT 1").execute(&self.writer),
+            sqlx::query("SELECT 1").execute(&self.reader),
+        );
+        writer_ok.is_ok() && reader_ok.is_ok()
     }
 }
