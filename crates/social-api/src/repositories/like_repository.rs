@@ -268,7 +268,7 @@ pub async fn batch_get_counts(
     // Use unnest for efficient batch lookup
     let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(
         r#"
-        SELECT lc.content_type, lc.content_id, lc.total_count
+        SELECT req.content_type, req.content_id, COALESCE(lc.total_count, 0) AS total_count
         FROM unnest($1::text[], $2::uuid[]) AS req(content_type, content_id)
         LEFT JOIN like_counts lc ON lc.content_type = req.content_type AND lc.content_id = req.content_id
         "#,
