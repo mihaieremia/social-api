@@ -2,6 +2,7 @@ mod cache;
 mod clients;
 mod config;
 mod db;
+mod errors;
 mod extractors;
 mod handlers;
 mod logging;
@@ -11,6 +12,7 @@ mod server;
 mod services;
 mod shutdown;
 mod state;
+mod tasks;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -51,7 +53,12 @@ async fn main() {
     let metrics_handle = middleware::metrics::init_metrics();
 
     // Build application state
-    let app_state = AppState::new(db, cache, config.clone());
+    let app_state = AppState::new(db.clone(), cache.clone(), config.clone());
+
+    // Spawn background leaderboard refresh task
+    let _refresh_handle = tasks::leaderboard_refresh::spawn_leaderboard_refresh(
+        db, cache, config.clone(),
+    );
 
     // Build router
     let app = server::build_router(app_state, metrics_handle);

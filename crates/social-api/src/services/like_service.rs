@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use shared::errors::AppError;
 use shared::types::*;
+use tracing;
 use uuid::Uuid;
 
 use crate::cache::manager::CacheManager;
@@ -144,18 +145,14 @@ impl LikeService {
     }
 
     /// Internal count getter with cache-first + stampede protection.
-    async fn get_count_inner(
-        &self,
-        content_type: &str,
-        content_id: Uuid,
-    ) -> Result<i64, AppError> {
+    async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
         let cache_key = format!("lc:{content_type}:{content_id}");
 
         // Try cache first
-        if let Some(cached) = self.cache.get(&cache_key).await {
-            if let Ok(count) = cached.parse::<i64>() {
-                return Ok(count);
-            }
+        if let Some(cached) = self.cache.get(&cache_key).await
+            && let Ok(count) = cached.parse::<i64>()
+        {
+            return Ok(count);
         }
 
         // Stampede protection: try to acquire lock
@@ -181,10 +178,10 @@ impl LikeService {
             // Someone else is fetching — wait briefly then retry cache
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-            if let Some(cached) = self.cache.get(&cache_key).await {
-                if let Ok(count) = cached.parse::<i64>() {
-                    return Ok(count);
-                }
+            if let Some(cached) = self.cache.get(&cache_key).await
+                && let Ok(count) = cached.parse::<i64>()
+            {
+                return Ok(count);
             }
 
             // Fallback to DB directly
@@ -222,7 +219,7 @@ impl LikeService {
         cursor: Option<&str>,
         limit: i64,
     ) -> Result<PaginatedResponse<UserLikeItem>, AppError> {
-        let limit = limit.min(100).max(1);
+        let limit = limit.clamp(1, 100);
 
         // Decode cursor if provided
         let (cursor_ts, cursor_id) = if let Some(cursor_str) = cursor {
@@ -295,15 +292,15 @@ impl LikeService {
         let mut missing_indices = Vec::new();
 
         for (i, (ct, cid)) in items.iter().enumerate() {
-            if let Some(Some(val)) = cached_values.get(i) {
-                if let Ok(count) = val.parse::<i64>() {
-                    results.push(BatchCountResult {
-                        content_type: ct.clone(),
-                        content_id: *cid,
-                        count,
-                    });
-                    continue;
-                }
+            if let Some(Some(val)) = cached_values.get(i)
+                && let Ok(count) = val.parse::<i64>()
+            {
+                results.push(BatchCountResult {
+                    content_type: ct.clone(),
+                    content_id: *cid,
+                    count,
+                });
+                continue;
             }
             missing_indices.push(i);
             results.push(BatchCountResult {
@@ -315,15 +312,12 @@ impl LikeService {
 
         // Fetch missing from DB
         if !missing_indices.is_empty() {
-            let missing_items: Vec<(String, Uuid)> = missing_indices
-                .iter()
-                .map(|&i| items[i].clone())
-                .collect();
+            let missing_items: Vec<(String, Uuid)> =
+                missing_indices.iter().map(|&i| items[i].clone()).collect();
 
-            let db_counts =
-                like_repository::batch_get_counts(&self.db.reader, &missing_items)
-                    .await
-                    .map_err(|e| AppError::Database(e.to_string()))?;
+            let db_counts = like_repository::batch_get_counts(&self.db.reader, &missing_items)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
 
             // Update results and cache
             for (ct, cid, count) in db_counts {
@@ -366,16 +360,19 @@ impl LikeService {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         // Build result map from DB results
-        let mut result_map: std::collections::HashMap<(String, Uuid), Option<chrono::DateTime<Utc>>> =
-            rows.into_iter().map(|(ct, cid, ts)| ((ct, cid), ts)).collect();
+        let mut result_map: std::collections::HashMap<
+            (String, Uuid),
+            Option<chrono::DateTime<Utc>>,
+        > = rows
+            .into_iter()
+            .map(|(ct, cid, ts)| ((ct, cid), ts))
+            .collect();
 
         // Ensure all requested items appear in results
         let results: Vec<BatchStatusResult> = items
             .iter()
             .map(|(ct, cid)| {
-                let liked_at = result_map
-                    .remove(&(ct.clone(), *cid))
-                    .flatten();
+                let liked_at = result_map.remove(&(ct.clone(), *cid)).flatten();
                 BatchStatusResult {
                     content_type: ct.clone(),
                     content_id: *cid,
@@ -389,22 +386,50 @@ impl LikeService {
     }
 
     /// Get top liked content leaderboard.
+    ///
+    /// Tries Redis sorted set `lb:{window}` first (populated by the background
+    /// refresh task). Falls back to a direct DB query on cache miss or error.
     pub async fn get_leaderboard(
         &self,
         content_type: Option<&str>,
         window: TimeWindow,
         limit: i64,
     ) -> Result<TopLikedResponse, AppError> {
-        let limit = limit.min(50).max(1);
+        let limit = limit.clamp(1, 50);
 
-        let since = window.duration_secs().map(|secs| {
-            Utc::now() - Duration::seconds(secs)
-        });
+        // Try Redis cache first (only when no content_type filter, since the
+        // background task stores the global leaderboard per window).
+        if content_type.is_none() {
+            let key = format!("lb:{}", window.as_str());
+            let cached = self
+                .cache
+                .zrevrange_with_scores(&key, 0, (limit - 1) as isize)
+                .await;
 
-        let rows =
-            like_repository::get_leaderboard(&self.db.reader, content_type, since, limit)
-                .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            if !cached.is_empty() {
+                let items: Vec<TopLikedItem> = cached
+                    .into_iter()
+                    .filter_map(|(member, score)| {
+                        parse_leaderboard_member(&member, score)
+                    })
+                    .collect();
+
+                return Ok(TopLikedResponse {
+                    window: window.as_str().to_string(),
+                    content_type: None,
+                    items,
+                });
+            }
+        }
+
+        // Cache miss or content_type filter — fall back to DB.
+        let since = window
+            .duration_secs()
+            .map(|secs| Utc::now() - Duration::seconds(secs));
+
+        let rows = like_repository::get_leaderboard(&self.db.reader, content_type, since, limit)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let items: Vec<TopLikedItem> = rows
             .into_iter()
@@ -429,11 +454,7 @@ impl LikeService {
         Ok(())
     }
 
-    async fn validate_content(
-        &self,
-        content_type: &str,
-        content_id: Uuid,
-    ) -> Result<(), AppError> {
+    async fn validate_content(&self, content_type: &str, content_id: Uuid) -> Result<(), AppError> {
         let valid = self
             .content_validator
             .validate(content_type, content_id)
@@ -446,5 +467,30 @@ impl LikeService {
             });
         }
         Ok(())
+    }
+}
+
+/// Parse a sorted-set member string `"content_type:content_id"` back into a
+/// `TopLikedItem`. Returns `None` (and logs a warning) when the format is
+/// unexpected so a single corrupt entry does not break the response.
+fn parse_leaderboard_member(member: &str, score: f64) -> Option<TopLikedItem> {
+    let colon_pos = member.find(':')?;
+    let ct = &member[..colon_pos];
+    let cid_str = &member[colon_pos + 1..];
+
+    match Uuid::parse_str(cid_str) {
+        Ok(cid) => Some(TopLikedItem {
+            content_type: ct.to_string(),
+            content_id: cid,
+            count: score as i64,
+        }),
+        Err(e) => {
+            tracing::warn!(
+                member = member,
+                error = %e,
+                "Invalid UUID in leaderboard cache member"
+            );
+            None
+        }
     }
 }

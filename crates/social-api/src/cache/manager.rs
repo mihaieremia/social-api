@@ -201,6 +201,64 @@ impl CacheManager {
         }
     }
 
+    /// Replace a sorted set atomically: DEL the old key then ZADD all members.
+    /// Used by the leaderboard refresh task.
+    pub async fn replace_sorted_set(&self, key: &str, members: &[(String, f64)]) {
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(key = key, error = %e, "Redis pool GET failed for ZADD");
+                return;
+            }
+        };
+
+        // Pipeline: DEL then ZADD
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        pipe.del(key).ignore();
+
+        if !members.is_empty() {
+            let mut zadd = redis::cmd("ZADD");
+            zadd.arg(key);
+            for (member, score) in members {
+                zadd.arg(*score).arg(member.as_str());
+            }
+            pipe.add_command(zadd).ignore();
+        }
+
+        if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
+            tracing::warn!(key = key, error = %e, "Redis ZADD pipeline failed");
+        }
+    }
+
+    /// Read the top entries from a sorted set in descending score order.
+    /// Returns `(member, score)` pairs, or an empty vec on miss/error.
+    pub async fn zrevrange_with_scores(
+        &self,
+        key: &str,
+        start: isize,
+        stop: isize,
+    ) -> Vec<(String, f64)> {
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(key = key, error = %e, "Redis pool GET failed for ZREVRANGE");
+                return vec![];
+            }
+        };
+
+        match conn
+            .zrevrange_withscores::<_, Vec<(String, f64)>>(key, start, stop)
+            .await
+        {
+            Ok(pairs) => pairs,
+            Err(e) => {
+                tracing::warn!(key = key, error = %e, "Redis ZREVRANGE failed");
+                vec![]
+            }
+        }
+    }
+
     /// Check if Redis is reachable (for health checks).
     pub async fn is_healthy(&self) -> bool {
         let mut conn = match self.pool.get().await {
