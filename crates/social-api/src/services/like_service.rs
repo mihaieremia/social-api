@@ -181,54 +181,59 @@ impl LikeService {
         })
     }
 
-    /// Internal count getter with cache-first + stampede protection.
+    /// Internal count getter with cache-first strategy and stampede protection.
+    ///
+    /// On a cache miss, the first task to notice registers a `watch::Sender` in
+    /// `pending_fetches` and fetches from DB. Every concurrent waiter subscribes
+    /// to that sender and is woken immediately when the result is ready — no
+    /// fixed sleep delay. If the fetcher fails, the sender drops, waiters
+    /// receive `Err` on `changed()` and fall back to DB directly.
     async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
         let cache_key = format!("lc:{content_type}:{content_id}");
 
-        // Try cache first
+        // Fast path: cache hit
         if let Some(cached) = self.cache.get(&cache_key).await
             && let Ok(count) = cached.parse::<i64>()
         {
             return Ok(count);
         }
 
-        // Stampede protection: try to acquire lock
-        let lock_key = format!("{cache_key}:lock");
-        let acquired = self.cache.set_nx(&lock_key, "1", 5).await;
-
-        if acquired {
-            // We got the lock — fetch from DB and populate cache
-            let count = like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(Self::db_err)?;
-
-            self.cache
-                .set(
-                    &cache_key,
-                    &count.to_string(),
-                    self.config.cache_ttl_like_counts_secs,
-                )
-                .await;
-
-            // Release lock immediately so other waiters can read from cache
-            self.cache.del(&lock_key).await;
-
-            Ok(count)
-        } else {
-            // Someone else is fetching — wait briefly then retry cache
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-            if let Some(cached) = self.cache.get(&cache_key).await
-                && let Ok(count) = cached.parse::<i64>()
-            {
+        // Stampede protection: if another task is already fetching this key,
+        // subscribe to its result instead of firing a duplicate DB query.
+        if let Some(sender) = self.pending_fetches.get(&cache_key) {
+            let mut rx = sender.subscribe();
+            // Release the DashMap shard lock before awaiting — holding it across
+            // an await point would block other tasks from reading the same shard.
+            drop(sender);
+            rx.changed().await.ok();
+            if let Some(count) = *rx.borrow() {
                 return Ok(count);
             }
-
-            // Fallback to DB directly
-            like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(Self::db_err)
+            // Sender was dropped (fetcher task failed) — fall through to DB directly.
         }
+
+        // We are the designated fetcher. Register a channel so concurrent
+        // waiters can subscribe to our result.
+        let (tx, _rx) = watch::channel(None::<i64>);
+        self.pending_fetches.insert(cache_key.clone(), tx.clone());
+
+        let count = like_repository::get_count(&self.db.reader, content_type, content_id)
+            .await
+            .map_err(Self::db_err)?;
+
+        self.cache
+            .set(
+                &cache_key,
+                &count.to_string(),
+                self.config.cache_ttl_like_counts_secs,
+            )
+            .await;
+
+        // Wake all waiters immediately with the fetched count.
+        tx.send(Some(count)).ok();
+        self.pending_fetches.remove(&cache_key);
+
+        Ok(count)
     }
 
     /// Get like status for a user on a content item.
