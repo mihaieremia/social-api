@@ -266,4 +266,56 @@ mod tests {
         assert_eq!(result, 42);
         unsafe { env::remove_var("__TEST_INVALID_VAR__") };
     }
+
+    #[test]
+    fn test_is_valid_content_type_known() {
+        let config = Config::new_for_test();
+        assert!(config.is_valid_content_type("post"));
+        assert!(config.is_valid_content_type("bonus_hunter"));
+        assert!(config.is_valid_content_type("top_picks"));
+    }
+
+    #[test]
+    fn test_is_valid_content_type_unknown() {
+        let config = Config::new_for_test();
+        assert!(!config.is_valid_content_type("nonexistent_xyz"));
+    }
+
+    #[test]
+    fn test_content_api_url_returns_url_for_known_type() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_url("post").is_some());
+        assert_eq!(config.content_api_url("post"), Some("http://localhost:8081"));
+    }
+
+    #[test]
+    fn test_content_api_url_returns_none_for_unknown() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_url("totally_unknown_type").is_none());
+    }
+
+    #[test]
+    fn test_env_or_default_with_valid_value() {
+        unsafe { std::env::set_var("__TEST_VALID_U32_COVERAGE__", "99") };
+        let result: u32 = env_or_default("__TEST_VALID_U32_COVERAGE__", 0);
+        assert_eq!(result, 99);
+        unsafe { std::env::remove_var("__TEST_VALID_U32_COVERAGE__") };
+    }
+
+    #[test]
+    fn test_new_for_test_has_all_content_types() {
+        let config = Config::new_for_test();
+        assert!(config.content_api_urls.contains_key("post"));
+        assert!(config.content_api_urls.contains_key("bonus_hunter"));
+        assert!(config.content_api_urls.contains_key("top_picks"));
+        assert_eq!(config.content_api_urls.len(), 3);
+    }
+
+    #[test]
+    fn test_new_for_test_defaults() {
+        let config = Config::new_for_test();
+        assert_eq!(config.http_port, 8080);
+        assert_eq!(config.rate_limit_write_per_minute, 30);
+        assert_eq!(config.rate_limit_read_per_minute, 1000);
+    }
 }
