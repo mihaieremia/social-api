@@ -385,3 +385,228 @@ pub async fn get_leaderboard(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_insert_like_new(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let (row, existed) = insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert!(!existed);
+        assert_eq!(row.content_type, "post");
+        assert_eq!(row.content_id, content_id);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_insert_like_idempotent(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        let (_, existed) = insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert!(existed, "second insert must report already_existed=true");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_delete_like_existing(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        let was_liked = delete_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert!(was_liked);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_delete_like_not_existing(pool: PgPool) {
+        let was_liked = delete_like(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(!was_liked);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_count_after_likes(pool: PgPool) {
+        let content_id = Uuid::new_v4();
+        for _ in 0..3 {
+            insert_like(&pool, Uuid::new_v4(), "post", content_id)
+                .await
+                .unwrap();
+        }
+        let count = get_count(&pool, "post", content_id).await.unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_count_zero_for_unknown_content(pool: PgPool) {
+        let count = get_count(&pool, "post", Uuid::new_v4()).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_like_status_liked(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        insert_like(&pool, user_id, "post", content_id).await.unwrap();
+        let ts = get_like_status(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert!(ts.is_some(), "liked_at must be Some after liking");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_like_status_not_liked(pool: PgPool) {
+        let ts = get_like_status(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(ts.is_none());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_batch_get_counts(pool: PgPool) {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        for _ in 0..3 {
+            insert_like(&pool, Uuid::new_v4(), "post", id1)
+                .await
+                .unwrap();
+        }
+        insert_like(&pool, Uuid::new_v4(), "post", id2).await.unwrap();
+
+        let counts = batch_get_counts(
+            &pool,
+            &[("post".to_string(), id1), ("post".to_string(), id2)],
+        )
+        .await
+        .unwrap();
+
+        let map: std::collections::HashMap<_, _> = counts
+            .into_iter()
+            .map(|(ct, cid, c)| ((ct, cid), c))
+            .collect();
+
+        assert_eq!(map[&("post".to_string(), id1)], 3);
+        assert_eq!(map[&("post".to_string(), id2)], 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_batch_get_statuses(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let liked_id = Uuid::new_v4();
+        let not_liked_id = Uuid::new_v4();
+
+        insert_like(&pool, user_id, "post", liked_id).await.unwrap();
+
+        let rows = batch_get_statuses(
+            &pool,
+            user_id,
+            &[
+                ("post".to_string(), liked_id),
+                ("post".to_string(), not_liked_id),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let map: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(ct, cid, ts)| ((ct, cid), ts))
+            .collect();
+
+        assert!(map[&("post".to_string(), liked_id)].is_some());
+        assert!(map[&("post".to_string(), not_liked_id)].is_none());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_user_likes_pagination(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        for _ in 0..5 {
+            insert_like(&pool, user_id, "post", Uuid::new_v4())
+                .await
+                .unwrap();
+        }
+
+        // Fetch limit+1 to detect has_more
+        let page1 = get_user_likes(&pool, user_id, None, None, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 3, "must fetch limit+1 to detect has_more");
+
+        // Use the last row as cursor
+        let last = page1.last().unwrap();
+        let page2 = get_user_likes(
+            &pool,
+            user_id,
+            None,
+            Some(last.created_at),
+            Some(last.id),
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert!(!page2.is_empty());
+        let page1_ids: std::collections::HashSet<_> = page1.iter().map(|r| r.id).collect();
+        for row in &page2 {
+            assert!(!page1_ids.contains(&row.id), "pages must not overlap");
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_get_leaderboard_ordered_by_count_desc(pool: PgPool) {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let id3 = Uuid::new_v4();
+
+        for _ in 0..3 {
+            insert_like(&pool, Uuid::new_v4(), "post", id1).await.unwrap();
+        }
+        for _ in 0..2 {
+            insert_like(&pool, Uuid::new_v4(), "post", id2).await.unwrap();
+        }
+        insert_like(&pool, Uuid::new_v4(), "post", id3).await.unwrap();
+
+        let rows = get_leaderboard(&pool, None, None, 10).await.unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].2 >= rows[1].2 && rows[1].2 >= rows[2].2);
+        assert_eq!(rows[0].2, 3);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn test_unique_constraint_enforced(pool: PgPool) {
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let (_, first) = insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+        let (_, second) = insert_like(&pool, user_id, "post", content_id)
+            .await
+            .unwrap();
+
+        assert!(!first);
+        assert!(second);
+
+        let count = get_count(&pool, "post", content_id).await.unwrap();
+        assert_eq!(count, 1, "duplicate like must not increment count");
+    }
+}
