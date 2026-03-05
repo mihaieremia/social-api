@@ -129,6 +129,7 @@ impl CacheManager {
     }
 
     /// Delete a key. Silently fails on Redis error.
+    #[allow(dead_code)]
     pub async fn del(&self, key: &str) {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
@@ -240,7 +241,8 @@ impl CacheManager {
     }
 
     /// Set a key with TTL only if it doesn't exist (for stampede lock).
-    /// Returns true if the lock was acquired.
+    /// Returns true if the key was set (did not previously exist).
+    #[allow(dead_code)]
     pub async fn set_nx(&self, key: &str, value: &str, ttl_secs: u64) -> bool {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,

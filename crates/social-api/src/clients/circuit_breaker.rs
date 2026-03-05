@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::RwLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Circuit breaker states.
@@ -50,6 +49,20 @@ struct CallRecord {
     success: bool,
 }
 
+/// All mutable circuit breaker state under a single lock.
+///
+/// Using one `Mutex<Inner>` instead of multiple separate `RwLock`/`Atomic`
+/// primitives eliminates TOCTOU races where threads could interleave reads
+/// and writes across separate locks.
+struct Inner {
+    state: CircuitState,
+    consecutive_failures: u32,
+    consecutive_successes: u32,
+    last_failure_time: Option<Instant>,
+    /// Sliding window of recent call outcomes for failure rate calculation.
+    call_window: VecDeque<CallRecord>,
+}
+
 /// Thread-safe circuit breaker state machine.
 ///
 /// State transitions:
@@ -60,177 +73,162 @@ struct CallRecord {
 /// - HalfOpen -> Open: on any failure
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
-    state: RwLock<CircuitState>,
-    consecutive_failures: AtomicU32,
-    consecutive_successes: AtomicU32,
-    last_failure_time: RwLock<Option<Instant>>,
-    /// Sliding window of recent call outcomes for failure rate calculation.
-    call_window: RwLock<VecDeque<CallRecord>>,
+    inner: Mutex<Inner>,
 }
 
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
-            state: RwLock::new(CircuitState::Closed),
-            consecutive_failures: AtomicU32::new(0),
-            consecutive_successes: AtomicU32::new(0),
-            last_failure_time: RwLock::new(None),
-            call_window: RwLock::new(VecDeque::new()),
+            inner: Mutex::new(Inner {
+                state: CircuitState::Closed,
+                consecutive_failures: 0,
+                consecutive_successes: 0,
+                last_failure_time: None,
+                call_window: VecDeque::new(),
+            }),
         }
     }
 
     /// Check if the circuit allows a request.
-    /// Returns true if the request should proceed, false if it should fail fast.
+    ///
+    /// The entire check-and-transition is performed under one lock hold,
+    /// eliminating the TOCTOU race that existed when state was read under a
+    /// read lock and then transitioned under a separate write lock.
     pub fn allow_request(&self) -> bool {
-        let state = *self.state.read().unwrap();
-
-        match state {
-            CircuitState::Closed => true,
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match inner.state {
+            CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
-                // Check if recovery timeout has elapsed
-                let should_try = self
+                let elapsed = inner
                     .last_failure_time
-                    .read()
-                    .unwrap()
                     .map(|t| t.elapsed() >= self.config.recovery_timeout)
                     .unwrap_or(false);
-
-                if should_try {
-                    self.transition_to(CircuitState::HalfOpen);
-                    true
-                } else {
-                    false
+                if elapsed {
+                    Self::do_transition(&self.config, &mut inner, CircuitState::HalfOpen);
                 }
+                elapsed
             }
-            CircuitState::HalfOpen => true,
         }
     }
 
     /// Record a successful request.
     pub fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::SeqCst);
-        self.push_call(true);
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.consecutive_failures = 0;
 
-        let state = *self.state.read().unwrap();
-        if state == CircuitState::HalfOpen {
-            let successes = self.consecutive_successes.fetch_add(1, Ordering::SeqCst) + 1;
-            if successes >= self.config.success_threshold {
-                self.transition_to(CircuitState::Closed);
+        // No point tracking outcomes we're already rejecting.
+        if inner.state != CircuitState::Open {
+            Self::push_call(&self.config, &mut inner, true);
+        }
+
+        if inner.state == CircuitState::HalfOpen {
+            inner.consecutive_successes += 1;
+            if inner.consecutive_successes >= self.config.success_threshold {
+                Self::do_transition(&self.config, &mut inner, CircuitState::Closed);
             }
         }
     }
 
     /// Record a failed request.
     pub fn record_failure(&self) {
-        self.consecutive_successes.store(0, Ordering::SeqCst);
-        *self.last_failure_time.write().unwrap() = Some(Instant::now());
-        self.push_call(false);
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.consecutive_successes = 0;
+        inner.last_failure_time = Some(Instant::now());
 
-        let state = *self.state.read().unwrap();
-        match state {
+        // No point tracking outcomes we're already rejecting.
+        if inner.state != CircuitState::Open {
+            Self::push_call(&self.config, &mut inner, false);
+        }
+
+        match inner.state {
             CircuitState::Closed => {
-                let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-                // Trip on consecutive failures
-                if failures >= self.config.failure_threshold {
-                    self.transition_to(CircuitState::Open);
+                inner.consecutive_failures += 1;
+                if inner.consecutive_failures >= self.config.failure_threshold {
+                    Self::do_transition(&self.config, &mut inner, CircuitState::Open);
                     return;
                 }
-                // Trip on failure rate in sliding window
-                if self.failure_rate_exceeded() {
-                    self.transition_to(CircuitState::Open);
+                if Self::failure_rate_exceeded(&self.config, &inner) {
+                    Self::do_transition(&self.config, &mut inner, CircuitState::Open);
                 }
             }
             CircuitState::HalfOpen => {
-                // Any failure in half-open goes back to open
-                self.transition_to(CircuitState::Open);
+                // Any failure in half-open goes back to open immediately.
+                Self::do_transition(&self.config, &mut inner, CircuitState::Open);
             }
             CircuitState::Open => {
-                // Already open, just update failure count
-                self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+                // Already open — just keep counting.
+                inner.consecutive_failures += 1;
             }
         }
     }
 
-    /// Get current state.
+    /// Get current state (test-only).
     #[cfg(test)]
     pub fn state(&self) -> CircuitState {
-        *self.state.read().unwrap()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).state
     }
 
     /// Push a call outcome into the sliding window, pruning expired entries.
-    fn push_call(&self, success: bool) {
+    fn push_call(config: &CircuitBreakerConfig, inner: &mut Inner, success: bool) {
         let now = Instant::now();
-        let mut window = self.call_window.write().unwrap();
-
-        // Prune entries older than the rate window
-        let cutoff = now - self.config.rate_window;
-        while let Some(front) = window.front() {
+        let cutoff = now - config.rate_window;
+        while let Some(front) = inner.call_window.front() {
             if front.timestamp < cutoff {
-                window.pop_front();
+                inner.call_window.pop_front();
             } else {
                 break;
             }
         }
-
-        window.push_back(CallRecord {
+        inner.call_window.push_back(CallRecord {
             timestamp: now,
             success,
         });
     }
 
     /// Check if the failure rate in the sliding window exceeds the threshold.
-    fn failure_rate_exceeded(&self) -> bool {
-        let window = self.call_window.read().unwrap();
-        let total = window.len() as u32;
-
-        // Don't trip on rate if we haven't seen enough calls
-        if total < self.config.min_calls_for_rate {
+    fn failure_rate_exceeded(config: &CircuitBreakerConfig, inner: &Inner) -> bool {
+        let total = inner.call_window.len() as u32;
+        if total < config.min_calls_for_rate {
             return false;
         }
-
-        let failures = window.iter().filter(|r| !r.success).count() as f64;
-        let rate = failures / total as f64;
-        rate > self.config.failure_rate_threshold
+        let failures = inner.call_window.iter().filter(|r| !r.success).count() as f64;
+        failures / total as f64 > config.failure_rate_threshold
     }
 
-    fn transition_to(&self, new_state: CircuitState) {
-        let old_state = {
-            let mut state = self.state.write().unwrap();
-            let old = *state;
-            *state = new_state;
-            old
-        };
+    fn do_transition(config: &CircuitBreakerConfig, inner: &mut Inner, new_state: CircuitState) {
+        let old_state = inner.state;
+        if old_state == new_state {
+            return;
+        }
 
-        if old_state != new_state {
-            tracing::warn!(
-                service = %self.config.service_name,
-                from = ?old_state,
-                to = ?new_state,
-                "Circuit breaker state transition"
-            );
+        inner.state = new_state;
 
-            // Update metrics
-            metrics::gauge!(
-                "social_api_circuit_breaker_state",
-                "service" => self.config.service_name.clone(),
-            )
-            .set(new_state.as_gauge_value());
+        tracing::warn!(
+            service = %config.service_name,
+            from = ?old_state,
+            to = ?new_state,
+            "Circuit breaker state transition"
+        );
 
-            // Reset counters on transition
-            match new_state {
-                CircuitState::Closed => {
-                    self.consecutive_failures.store(0, Ordering::SeqCst);
-                    self.consecutive_successes.store(0, Ordering::SeqCst);
-                    // Clear the window on close so stale failures don't re-trip
-                    self.call_window.write().unwrap().clear();
-                }
-                CircuitState::HalfOpen => {
-                    self.consecutive_successes.store(0, Ordering::SeqCst);
-                }
-                CircuitState::Open => {
-                    self.consecutive_successes.store(0, Ordering::SeqCst);
-                }
+        metrics::gauge!(
+            "social_api_circuit_breaker_state",
+            "service" => config.service_name.clone(),
+        )
+        .set(new_state.as_gauge_value());
+
+        match new_state {
+            CircuitState::Closed => {
+                inner.consecutive_failures = 0;
+                inner.consecutive_successes = 0;
+                // Clear window on close so stale failures don't re-trip via rate check.
+                inner.call_window.clear();
+            }
+            CircuitState::HalfOpen => {
+                inner.consecutive_successes = 0;
+            }
+            CircuitState::Open => {
+                inner.consecutive_successes = 0;
             }
         }
     }
@@ -346,22 +344,20 @@ mod tests {
     #[test]
     fn test_failure_rate_trips_breaker() {
         let config = CircuitBreakerConfig {
-            failure_threshold: 100, // high so consecutive doesn't trip
+            failure_threshold: 100,
             min_calls_for_rate: 10,
             failure_rate_threshold: 0.5,
             ..test_config()
         };
         let cb = CircuitBreaker::new(config);
 
-        // 4 successes + 6 failures = 60% failure rate (>50%)
         for _ in 0..4 {
             cb.record_success();
         }
         for _ in 0..5 {
             cb.record_failure();
-            assert_eq!(cb.state(), CircuitState::Closed); // not enough calls yet
+            assert_eq!(cb.state(), CircuitState::Closed);
         }
-        // 10th call (failure) — now 6/10 = 60% > 50%
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
     }
@@ -369,14 +365,13 @@ mod tests {
     #[test]
     fn test_failure_rate_needs_minimum_calls() {
         let config = CircuitBreakerConfig {
-            failure_threshold: 100, // high so consecutive doesn't trip
+            failure_threshold: 100,
             min_calls_for_rate: 10,
             failure_rate_threshold: 0.5,
             ..test_config()
         };
         let cb = CircuitBreaker::new(config);
 
-        // 5 failures, but only 5 calls — below min_calls_for_rate
         for _ in 0..5 {
             cb.record_failure();
         }
@@ -393,20 +388,43 @@ mod tests {
         };
         let cb = CircuitBreaker::new(config);
 
-        // Trip via consecutive, then recover
         for _ in 0..3 {
             cb.record_failure();
         }
         assert_eq!(cb.state(), CircuitState::Open);
 
         std::thread::sleep(Duration::from_millis(20));
-        cb.allow_request(); // HalfOpen
+        cb.allow_request();
         cb.record_success();
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
 
-        // Window should be cleared — old failures shouldn't cause rate trip
-        let window = cb.call_window.read().unwrap();
-        assert!(window.is_empty());
+        let inner = cb.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(inner.call_window.is_empty());
+    }
+
+    #[test]
+    fn test_allow_request_atomic_no_double_transition() {
+        use std::sync::Arc;
+        let config = CircuitBreakerConfig {
+            recovery_timeout: Duration::from_millis(1),
+            ..test_config()
+        };
+        let cb = Arc::new(CircuitBreaker::new(config));
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let cb = Arc::clone(&cb);
+                std::thread::spawn(move || cb.allow_request())
+            })
+            .collect();
+
+        let allowed: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(allowed.iter().all(|&a| a));
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 }

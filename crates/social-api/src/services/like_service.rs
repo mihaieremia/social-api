@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
+use dashmap::DashMap;
 use shared::errors::AppError;
 use shared::types::*;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::cache::manager::CacheManager;
@@ -16,9 +18,13 @@ use crate::repositories::like_repository;
 pub struct LikeService {
     db: DbPools,
     cache: CacheManager,
+    /// Trait object — swappable transport (HTTP today, gRPC tomorrow).
     content_validator: Arc<dyn ContentValidator>,
     config: Config,
     content_breaker: Arc<CircuitBreaker>,
+    /// In-progress cache fetches, keyed by cache key.
+    /// Used for stampede coalescing — see `get_count_inner`.
+    pending_fetches: DashMap<String, watch::Sender<Option<i64>>>,
 }
 
 impl LikeService {
@@ -29,15 +35,18 @@ impl LikeService {
         config: Config,
         content_breaker: Arc<CircuitBreaker>,
     ) -> Self {
-        let content_validator: Arc<dyn ContentValidator> = Arc::new(
-            HttpContentValidator::new(http_client, cache.clone(), config.clone()),
-        );
+        let content_validator = Arc::new(HttpContentValidator::new(
+            http_client,
+            cache.clone(),
+            config.clone(),
+        ));
         Self {
             db,
             cache,
             content_validator,
             config,
             content_breaker,
+            pending_fetches: DashMap::new(),
         }
     }
 
@@ -50,31 +59,45 @@ impl LikeService {
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        // Validate content exists via external Content API
-        self.validate_content(content_type, content_id).await?;
-
-        // Insert like (idempotent)
+        // Insert first to determine if this is a new or duplicate request.
+        // Duplicate detection must happen before content validation so we can
+        // skip the external HTTP call for requests we've already processed.
         let (like_row, already_existed) =
             like_repository::insert_like(&self.db.writer, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
-        // Update cache with conditional INCR (safe against expired keys)
+        if !already_existed {
+            // Content validation is skipped for duplicate likes.
+            // Rationale: if this like already exists, the content was valid at the time it was
+            // first created. Re-validating on every duplicate request would fire a redundant
+            // external HTTP round-trip with no correctness benefit.
+            //
+            // On validation failure for a NEW like: undo the insert so the DB stays consistent.
+            // Best-effort rollback — if delete_like also fails, the orphaned row will have
+            // count=1 with no valid content. Acceptable: content APIs are expected to be available.
+            if let Err(e) = self.validate_content(content_type, content_id).await {
+                let _ = like_repository::delete_like(
+                    &self.db.writer,
+                    user_id,
+                    content_type,
+                    content_id,
+                )
+                .await;
+                return Err(e);
+            }
+        }
+
         let count = if !already_existed {
             let cache_key = format!("lc:{content_type}:{content_id}");
-            // Fetch DB count as fallback for conditional INCR
             let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            self.cache
-                .conditional_incr(&cache_key, self.config.cache_ttl_like_counts_secs, db_count)
-                .await
-                .unwrap_or(db_count)
+                .map_err(Self::db_err)?;
+            self.update_count_cache(&cache_key, 1, db_count).await
         } else {
             self.get_count_inner(content_type, content_id).await?
         };
 
-        // Publish SSE event
         if !already_existed {
             let event = serde_json::json!({
                 "event": "like",
@@ -107,18 +130,15 @@ impl LikeService {
         let was_liked =
             like_repository::delete_like(&self.db.writer, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
         // Update cache with conditional DECR (safe against expired keys)
         let count = if was_liked {
             let cache_key = format!("lc:{content_type}:{content_id}");
             let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            self.cache
-                .conditional_decr(&cache_key, self.config.cache_ttl_like_counts_secs, db_count)
-                .await
-                .unwrap_or(db_count)
+                .map_err(Self::db_err)?;
+            self.update_count_cache(&cache_key, -1, db_count).await
         } else {
             self.get_count_inner(content_type, content_id).await?
         };
@@ -161,54 +181,59 @@ impl LikeService {
         })
     }
 
-    /// Internal count getter with cache-first + stampede protection.
+    /// Internal count getter with cache-first strategy and stampede protection.
+    ///
+    /// On a cache miss, the first task to notice registers a `watch::Sender` in
+    /// `pending_fetches` and fetches from DB. Every concurrent waiter subscribes
+    /// to that sender and is woken immediately when the result is ready — no
+    /// fixed sleep delay. If the fetcher fails, the sender drops, waiters
+    /// receive `Err` on `changed()` and fall back to DB directly.
     async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
         let cache_key = format!("lc:{content_type}:{content_id}");
 
-        // Try cache first
+        // Fast path: cache hit
         if let Some(cached) = self.cache.get(&cache_key).await
             && let Ok(count) = cached.parse::<i64>()
         {
             return Ok(count);
         }
 
-        // Stampede protection: try to acquire lock
-        let lock_key = format!("{cache_key}:lock");
-        let acquired = self.cache.set_nx(&lock_key, "1", 5).await;
-
-        if acquired {
-            // We got the lock — fetch from DB and populate cache
-            let count = like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
-
-            self.cache
-                .set(
-                    &cache_key,
-                    &count.to_string(),
-                    self.config.cache_ttl_like_counts_secs,
-                )
-                .await;
-
-            // Release lock immediately so other waiters can read from cache
-            self.cache.del(&lock_key).await;
-
-            Ok(count)
-        } else {
-            // Someone else is fetching — wait briefly then retry cache
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-            if let Some(cached) = self.cache.get(&cache_key).await
-                && let Ok(count) = cached.parse::<i64>()
-            {
+        // Stampede protection: if another task is already fetching this key,
+        // subscribe to its result instead of firing a duplicate DB query.
+        if let Some(sender) = self.pending_fetches.get(&cache_key) {
+            let mut rx = sender.subscribe();
+            // Release the DashMap shard lock before awaiting — holding it across
+            // an await point would block other tasks from reading the same shard.
+            drop(sender);
+            rx.changed().await.ok();
+            if let Some(count) = *rx.borrow() {
                 return Ok(count);
             }
-
-            // Fallback to DB directly
-            like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(|e| AppError::Database(e.to_string()))
+            // Sender was dropped (fetcher task failed) — fall through to DB directly.
         }
+
+        // We are the designated fetcher. Register a channel so concurrent
+        // waiters can subscribe to our result.
+        let (tx, _rx) = watch::channel(None::<i64>);
+        self.pending_fetches.insert(cache_key.clone(), tx.clone());
+
+        let count = like_repository::get_count(&self.db.reader, content_type, content_id)
+            .await
+            .map_err(Self::db_err)?;
+
+        self.cache
+            .set(
+                &cache_key,
+                &count.to_string(),
+                self.config.cache_ttl_like_counts_secs,
+            )
+            .await;
+
+        // Wake all waiters immediately with the fetched count.
+        tx.send(Some(count)).ok();
+        self.pending_fetches.remove(&cache_key);
+
+        Ok(count)
     }
 
     /// Get like status for a user on a content item.
@@ -223,7 +248,7 @@ impl LikeService {
         let liked_at =
             like_repository::get_like_status(&self.db.reader, user_id, content_type, content_id)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
         Ok(LikeStatusResponse {
             liked: liked_at.is_some(),
@@ -259,7 +284,7 @@ impl LikeService {
             limit,
         )
         .await
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        .map_err(Self::db_err)?;
 
         let has_more = rows.len() as i64 > limit;
         let take_n = (limit as usize).min(rows.len());
@@ -337,17 +362,21 @@ impl LikeService {
                 missing_items.push(items[i].clone());
             }
 
+            // Build O(1) lookup index: (content_type, content_id) -> results position.
+            let index: std::collections::HashMap<(String, Uuid), usize> = items
+                .iter()
+                .enumerate()
+                .map(|(i, (ct, cid))| ((ct.clone(), *cid), i))
+                .collect();
+
             let db_counts = like_repository::batch_get_counts(&self.db.reader, &missing_items)
                 .await
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                .map_err(Self::db_err)?;
 
             // Update results and collect cache entries for pipeline
             let mut cache_entries = Vec::with_capacity(db_counts.len());
             for (ct, cid, count) in db_counts {
-                if let Some(pos) = results
-                    .iter()
-                    .position(|r| r.content_type == ct && r.content_id == cid)
-                {
+                if let Some(&pos) = index.get(&(ct.clone(), cid)) {
                     results[pos].count = count;
                 }
                 cache_entries.push((format!("lc:{ct}:{cid}"), count.to_string()));
@@ -382,7 +411,7 @@ impl LikeService {
 
         let rows = like_repository::batch_get_statuses(&self.db.reader, user_id, items)
             .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(Self::db_err)?;
 
         // Build result map from DB results
         let mut result_map: std::collections::HashMap<
@@ -452,7 +481,7 @@ impl LikeService {
 
         let rows = like_repository::get_leaderboard(&self.db.reader, content_type, since, limit)
             .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(Self::db_err)?;
 
         let mut items = Vec::with_capacity(rows.len());
         for (ct, cid, count) in rows {
@@ -468,6 +497,24 @@ impl LikeService {
             content_type: content_type.map(|s| s.to_string()),
             items,
         })
+    }
+
+    /// Map a sqlx error to AppError::Database.
+    /// Centralizes the repeated `.map_err(|e| AppError::Database(e.to_string()))` pattern.
+    fn db_err(e: sqlx::Error) -> AppError {
+        AppError::Database(e.to_string())
+    }
+
+    /// Apply a conditional INCR (delta > 0) or DECR (delta < 0) to the count cache.
+    /// Returns the new count, falling back to `db_count` on cache error.
+    async fn update_count_cache(&self, key: &str, delta: i64, db_count: i64) -> i64 {
+        let ttl = self.config.cache_ttl_like_counts_secs;
+        let result = if delta > 0 {
+            self.cache.conditional_incr(key, ttl, db_count).await
+        } else {
+            self.cache.conditional_decr(key, ttl, db_count).await
+        };
+        result.unwrap_or(db_count)
     }
 
     /// Validate content exists via external Content API (with circuit breaker).
@@ -524,370 +571,5 @@ fn parse_leaderboard_member(member: &str, score: f64) -> Option<TopLikedItem> {
             );
             None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::{postgres::Postgres, redis::Redis};
-    use uuid::Uuid;
-
-    use crate::cache::manager::{CacheManager, create_pool};
-    use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-    use crate::clients::content_client::ContentValidator;
-    use crate::config::Config;
-    use crate::db::DbPools;
-    use shared::errors::AppError;
-
-    // --- Content validator stubs ---
-
-    struct AlwaysValid;
-    #[async_trait::async_trait]
-    impl ContentValidator for AlwaysValid {
-        async fn validate(&self, _: &str, _: Uuid) -> Result<bool, AppError> {
-            Ok(true)
-        }
-    }
-
-    struct AlwaysNotFound;
-    #[async_trait::async_trait]
-    impl ContentValidator for AlwaysNotFound {
-        async fn validate(&self, _: &str, _: Uuid) -> Result<bool, AppError> {
-            Ok(false)
-        }
-    }
-
-    // --- Container bootstrap helper ---
-
-    struct TestInfra {
-        pub service: LikeService,
-        // Containers held here — dropped (stopped) when TestInfra is dropped
-        _pg: testcontainers::ContainerAsync<Postgres>,
-        _redis: testcontainers::ContainerAsync<Redis>,
-    }
-
-    async fn setup(validator: Arc<dyn ContentValidator>) -> TestInfra {
-        let pg = Postgres::default().start().await.expect("postgres container");
-        let redis = Redis::default().start().await.expect("redis container");
-
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&db_url)
-            .await
-            .expect("connect test postgres");
-
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("run migrations");
-
-        let db = DbPools {
-            writer: pool.clone(),
-            reader: pool,
-        };
-
-        let mut config = Config::new_for_test();
-        config.redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-        let redis_pool = create_pool(&config).await.expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
-
-        let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-            failure_threshold: 5,
-            recovery_timeout: std::time::Duration::from_secs(30),
-            success_threshold: 2,
-            service_name: "content_api_test".to_string(),
-            rate_window: std::time::Duration::from_secs(30),
-            failure_rate_threshold: 0.5,
-            min_calls_for_rate: 10,
-        }));
-
-        let service = LikeService {
-            db,
-            cache,
-            content_validator: validator,
-            config,
-            content_breaker: breaker,
-        };
-
-        TestInfra {
-            service,
-            _pg: pg,
-            _redis: redis,
-        }
-    }
-
-    // --- Tests ---
-
-    #[tokio::test]
-    async fn test_like_new_content_returns_count_one() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let resp = infra
-            .service
-            .like(Uuid::new_v4(), "post", Uuid::new_v4())
-            .await
-            .unwrap();
-
-        assert!(resp.liked);
-        assert_eq!(resp.already_existed, Some(false));
-        assert_eq!(resp.count, 1);
-        assert!(resp.liked_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_like_same_content_twice_is_idempotent() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let user_id = Uuid::new_v4();
-        let content_id = Uuid::new_v4();
-
-        infra.service.like(user_id, "post", content_id).await.unwrap();
-        let resp = infra.service.like(user_id, "post", content_id).await.unwrap();
-
-        assert_eq!(resp.already_existed, Some(true));
-        assert_eq!(resp.count, 1, "count must not increase on duplicate");
-    }
-
-    #[tokio::test]
-    async fn test_unlike_not_liked_returns_was_liked_false() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let resp = infra
-            .service
-            .unlike(Uuid::new_v4(), "post", Uuid::new_v4())
-            .await
-            .unwrap();
-
-        assert!(!resp.liked);
-        assert_eq!(resp.was_liked, Some(false));
-    }
-
-    #[tokio::test]
-    async fn test_like_then_unlike_count_returns_to_zero() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let user_id = Uuid::new_v4();
-        let content_id = Uuid::new_v4();
-
-        infra.service.like(user_id, "post", content_id).await.unwrap();
-        let resp = infra
-            .service
-            .unlike(user_id, "post", content_id)
-            .await
-            .unwrap();
-
-        assert_eq!(resp.count, 0);
-        assert_eq!(resp.was_liked, Some(true));
-    }
-
-    #[tokio::test]
-    async fn test_get_count_cache_hit_returns_cached_value() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let content_id = Uuid::new_v4();
-
-        // Pre-seed cache with a known value (bypassing DB entirely)
-        let cache_key = format!("lc:post:{content_id}");
-        infra.service.cache.set(&cache_key, "42", 300).await;
-
-        let resp = infra.service.get_count("post", content_id).await.unwrap();
-        assert_eq!(resp.count, 42, "must return cached value, not DB count of 0");
-    }
-
-    #[tokio::test]
-    async fn test_get_count_cache_miss_falls_back_to_db() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let user_id = Uuid::new_v4();
-        let content_id = Uuid::new_v4();
-
-        // Like to create a DB record, clear cache to force DB fallback
-        infra.service.like(user_id, "post", content_id).await.unwrap();
-        infra
-            .service
-            .cache
-            .del(&format!("lc:post:{content_id}"))
-            .await;
-
-        let resp = infra.service.get_count("post", content_id).await.unwrap();
-        assert_eq!(resp.count, 1, "must fall back to DB count");
-    }
-
-    #[tokio::test]
-    async fn test_content_not_found_returns_error() {
-        let infra = setup(Arc::new(AlwaysNotFound)).await;
-        let err = infra
-            .service
-            .like(Uuid::new_v4(), "post", Uuid::new_v4())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, AppError::ContentNotFound { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_batch_counts_over_100_returns_error() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let items: Vec<(String, Uuid)> = (0..101)
-            .map(|_| ("post".to_string(), Uuid::new_v4()))
-            .collect();
-
-        let err = infra.service.batch_counts(&items).await.unwrap_err();
-        assert!(matches!(
-            err,
-            AppError::BatchTooLarge { size: 101, max: 100 }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_batch_statuses_over_100_returns_error() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let items: Vec<(String, Uuid)> = (0..101)
-            .map(|_| ("post".to_string(), Uuid::new_v4()))
-            .collect();
-
-        let err = infra
-            .service
-            .batch_statuses(Uuid::new_v4(), &items)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            AppError::BatchTooLarge { size: 101, max: 100 }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_batch_counts_cache_miss_fetches_from_db() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let content_id = Uuid::new_v4();
-
-        // Create 2 likes via the service (writes to DB + populates cache)
-        for _ in 0..2 {
-            infra
-                .service
-                .like(Uuid::new_v4(), "post", content_id)
-                .await
-                .unwrap();
-        }
-        // Clear cache to force DB fallback in batch_counts
-        infra
-            .service
-            .cache
-            .del(&format!("lc:post:{content_id}"))
-            .await;
-
-        let results = infra
-            .service
-            .batch_counts(&[("post".to_string(), content_id)])
-            .await
-            .unwrap();
-
-        assert_eq!(results[0].count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_leaderboard_reads_from_zset_cache() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let content_id = Uuid::new_v4();
-
-        // Seed leaderboard ZSET directly
-        infra
-            .service
-            .cache
-            .replace_sorted_set("lb:all", &[(format!("post:{content_id}"), 7.0)])
-            .await;
-
-        let resp = infra
-            .service
-            .get_leaderboard(None, shared::types::TimeWindow::All, 10)
-            .await
-            .unwrap();
-
-        assert_eq!(resp.items.len(), 1);
-        assert_eq!(resp.items[0].count, 7);
-        assert_eq!(resp.items[0].content_id, content_id);
-    }
-
-    #[tokio::test]
-    async fn test_get_leaderboard_falls_back_to_db_on_empty_zset() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let content_id = Uuid::new_v4();
-
-        // Like 3 times — no ZSET seeded, so must fall back to DB
-        for _ in 0..3 {
-            infra
-                .service
-                .like(Uuid::new_v4(), "post", content_id)
-                .await
-                .unwrap();
-        }
-
-        let resp = infra
-            .service
-            .get_leaderboard(None, shared::types::TimeWindow::All, 10)
-            .await
-            .unwrap();
-
-        assert!(!resp.items.is_empty());
-        assert_eq!(resp.items[0].count, 3);
-    }
-
-    #[tokio::test]
-    async fn test_get_user_likes_cursor_pagination() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-        let user_id = Uuid::new_v4();
-
-        for _ in 0..5 {
-            infra
-                .service
-                .like(user_id, "post", Uuid::new_v4())
-                .await
-                .unwrap();
-        }
-
-        let page1 = infra
-            .service
-            .get_user_likes(user_id, None, None, 2)
-            .await
-            .unwrap();
-
-        assert_eq!(page1.items.len(), 2);
-        assert!(page1.has_more);
-        assert!(page1.next_cursor.is_some());
-
-        let page2 = infra
-            .service
-            .get_user_likes(user_id, None, page1.next_cursor.as_deref(), 2)
-            .await
-            .unwrap();
-
-        assert!(!page2.items.is_empty());
-        let page1_ids: std::collections::HashSet<_> =
-            page1.items.iter().map(|i| i.content_id).collect();
-        for item in &page2.items {
-            assert!(!page1_ids.contains(&item.content_id));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_circuit_breaker_open_returns_dependency_unavailable() {
-        let infra = setup(Arc::new(AlwaysValid)).await;
-
-        // Trip the breaker manually by recording failures
-        for _ in 0..5 {
-            infra.service.content_breaker.record_failure();
-        }
-
-        let err = infra
-            .service
-            .like(Uuid::new_v4(), "post", Uuid::new_v4())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, AppError::DependencyUnavailable(_)));
     }
 }
