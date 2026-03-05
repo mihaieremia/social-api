@@ -74,8 +74,12 @@ pub struct ApiError {
 pub struct ApiErrorBody {
     /// Machine-readable error code
     pub code: ErrorCode,
+    /// Human-readable error message
     pub message: String,
+    /// Unique request identifier for tracing
+    #[schema(example = "req_a1b2c3d4")]
     pub request_id: String,
+    /// Additional context about the error
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }

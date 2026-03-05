@@ -5,14 +5,14 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Authenticated user identity extracted from token validation.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
     pub display_name: String,
 }
 
 /// Reference to a specific content item.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ContentRef {
     pub content_type: String,
     pub content_id: Uuid,
@@ -77,7 +77,7 @@ impl fmt::Display for TimeWindow {
 }
 
 /// A like record as stored in the database.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Like {
     pub id: i64,
     pub user_id: Uuid,
@@ -109,7 +109,7 @@ pub enum LikeEvent {
 }
 
 /// Pagination parameters for cursor-based pagination.
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PaginationParams {
     pub cursor: Option<String>,
     pub limit: Option<i64>,
@@ -145,7 +145,9 @@ impl From<PaginatedResponse<UserLikeItem>> for PaginatedUserLikes {
 /// A user's liked item in list responses.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserLikeItem {
+    #[schema(example = "post")]
     pub content_type: String,
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: Uuid,
     pub liked_at: DateTime<Utc>,
 }
@@ -153,7 +155,9 @@ pub struct UserLikeItem {
 /// Like count response.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeCountResponse {
+    #[schema(example = "post")]
     pub content_type: String,
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: Uuid,
     #[schema(example = 42)]
     pub count: i64,
@@ -162,6 +166,7 @@ pub struct LikeCountResponse {
 /// Like status response.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeStatusResponse {
+    #[schema(example = true)]
     pub liked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liked_at: Option<DateTime<Utc>>,
@@ -170,10 +175,13 @@ pub struct LikeStatusResponse {
 /// Like action response (after like/unlike).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LikeActionResponse {
+    #[schema(example = true)]
     pub liked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = false)]
     pub already_existed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = true)]
     pub was_liked: Option<bool>,
     #[schema(example = 42)]
     pub count: i64,
@@ -216,8 +224,11 @@ pub struct BatchStatusResult {
 /// Top liked content item.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TopLikedItem {
+    #[schema(example = "post")]
     pub content_type: String,
+    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: Uuid,
+    #[schema(example = 1547)]
     pub count: i64,
 }
 
@@ -250,6 +261,7 @@ pub struct HealthDetail {
 /// Health check response.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HealthResponse {
+    #[schema(example = "ok")]
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<std::collections::HashMap<String, HealthDetail>>,

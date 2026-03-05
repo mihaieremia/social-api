@@ -10,17 +10,11 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
-use utoipa::ToSchema;
-
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct StreamParams {
-    /// Content type to subscribe to
-    #[schema(example = "post")]
     pub content_type: String,
-    /// Content ID to subscribe to
-    #[schema(example = "731b0395-4888-4822-b516-05b4b7bf2089")]
     pub content_id: String,
 }
 
