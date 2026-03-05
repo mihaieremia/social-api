@@ -204,6 +204,20 @@ pub async fn write_rate_limit(
     response
 }
 
+/// Extract the real client IP for rate limiting.
+///
+/// Uses the RIGHTMOST value in X-Forwarded-For — the address appended by the
+/// last trusted proxy (load balancer), which clients cannot forge. Falls back
+/// to X-Real-IP (set by nginx/envoy trusted proxies), then "unknown".
+fn extract_real_ip(header_value: &str) -> &str {
+    header_value
+        .rsplit(',')
+        .next()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+}
+
 /// Read rate limit middleware (per-IP, applied to GET).
 /// Uses `from_fn_with_state` to access AppState.
 pub async fn read_rate_limit(
@@ -211,18 +225,20 @@ pub async fn read_rate_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    let ip = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            request
-                .headers()
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-        })
-        .unwrap_or("unknown")
-        .to_string();
+    let ip = {
+        let raw = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                request
+                    .headers()
+                    .get("x-real-ip")
+                    .and_then(|v| v.to_str().ok())
+            })
+            .unwrap_or("unknown");
+        extract_real_ip(raw).to_string()
+    };
 
     let key = format!("rl:r:{}", fnv1a_hash(&ip));
     let limit = state.config().rate_limit_read_per_minute;
@@ -257,6 +273,16 @@ mod tests {
     use testcontainers::runners::AsyncRunner;
 
     // --- Pure function tests (no infrastructure needed) ---
+
+    #[test]
+    fn test_extract_rightmost_ip_from_forwarded_for() {
+        assert_eq!(
+            extract_real_ip("1.1.1.1, 2.2.2.2, 10.0.0.1"),
+            "10.0.0.1"
+        );
+        assert_eq!(extract_real_ip("192.168.1.100"), "192.168.1.100");
+        assert_eq!(extract_real_ip("  1.2.3.4  ,  5.6.7.8  "), "5.6.7.8");
+    }
 
     #[test]
     fn test_fnv1a_hash_is_deterministic() {
