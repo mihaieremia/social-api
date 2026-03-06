@@ -263,6 +263,18 @@ fn fnv1a_hash(input: &str) -> u64 {
     hash
 }
 
+/// Public wrapper for integration/stress tests.
+#[allow(dead_code)]
+pub async fn check_rate_limit_public(
+    cache: &CacheManager,
+    key: &str,
+    limit: u64,
+    window_secs: u64,
+) -> (bool, i64) {
+    let result = check_rate_limit_inner(cache, key, limit, window_secs).await;
+    (result.allowed, result.current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
