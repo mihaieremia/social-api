@@ -10,6 +10,11 @@ pub struct Config {
     pub read_database_url: String,
     pub redis_url: String,
     pub http_port: u16,
+    #[allow(dead_code)]
+    pub grpc_port: u16,
+    /// Transport for outgoing inter-service calls: "http" or "grpc"
+    #[allow(dead_code)]
+    pub internal_transport: String,
 
     // Content API URLs (keyed by content type)
     pub content_api_urls: HashMap<String, String>,
@@ -86,6 +91,10 @@ impl Config {
             panic!("HTTP_PORT must be a valid port number, got: {http_port_str}")
         });
 
+        let grpc_port: u16 = env_or_default("GRPC_PORT", 50051);
+        let internal_transport =
+            env::var("INTERNAL_TRANSPORT").unwrap_or_else(|_| "http".to_string());
+
         // Build content API URL map from CONTENT_API_{TYPE}_URL env vars
         let content_api_urls = build_content_api_urls();
 
@@ -100,6 +109,8 @@ impl Config {
             read_database_url,
             redis_url,
             http_port,
+            grpc_port,
+            internal_transport,
             content_api_urls,
             profile_api_url,
             db_max_connections: env_or_default("DB_MAX_CONNECTIONS", 20),
@@ -152,6 +163,12 @@ impl Config {
         self.content_api_urls.get(content_type).map(|s| s.as_str())
     }
 
+    /// Check if gRPC transport is configured for internal calls.
+    #[allow(dead_code)]
+    pub fn use_grpc_transport(&self) -> bool {
+        self.internal_transport.eq_ignore_ascii_case("grpc")
+    }
+
     /// Minimal config for unit/integration tests — does NOT read environment variables.
     #[allow(dead_code)]
     pub fn new_for_test() -> Self {
@@ -165,6 +182,8 @@ impl Config {
 
         Self {
             http_port: 8080,
+            grpc_port: 50051,
+            internal_transport: "http".to_string(),
             database_url: "postgres://social:social_password@localhost:5432/social_api_test"
                 .to_string(),
             read_database_url: "postgres://social:social_password@localhost:5432/social_api_test"
@@ -309,6 +328,9 @@ mod tests {
     fn test_new_for_test_defaults() {
         let config = Config::new_for_test();
         assert_eq!(config.http_port, 8080);
+        assert_eq!(config.grpc_port, 50051);
+        assert_eq!(config.internal_transport, "http");
+        assert!(!config.use_grpc_transport());
         assert_eq!(config.rate_limit_write_per_minute, 30);
         assert_eq!(config.rate_limit_read_per_minute, 1000);
     }
@@ -430,10 +452,15 @@ mod tests {
             env::set_var("SSE_BROADCAST_CAPACITY", "128");
             env::set_var("LEADERBOARD_REFRESH_INTERVAL_SECS", "30");
             env::set_var("LOG_LEVEL", "debug");
+            env::set_var("GRPC_PORT", "50052");
+            env::set_var("INTERNAL_TRANSPORT", "grpc");
         }
 
         let config = Config::from_env();
         assert_eq!(config.http_port, 8080);
+        assert_eq!(config.grpc_port, 50052);
+        assert_eq!(config.internal_transport, "grpc");
+        assert!(config.use_grpc_transport());
         assert_eq!(config.database_url, "postgres://x:x@localhost/x");
         assert_eq!(config.read_database_url, "postgres://x:x@localhost/x");
         assert_eq!(config.redis_url, "redis://localhost");
@@ -481,6 +508,8 @@ mod tests {
             env::remove_var("SSE_BROADCAST_CAPACITY");
             env::remove_var("LEADERBOARD_REFRESH_INTERVAL_SECS");
             env::remove_var("LOG_LEVEL");
+            env::remove_var("GRPC_PORT");
+            env::remove_var("INTERNAL_TRANSPORT");
         }
     }
 
@@ -520,6 +549,29 @@ mod tests {
             env::remove_var("PROFILE_API_URL");
             env::remove_var("CONTENT_API_POST_URL");
         }
+    }
+
+    #[test]
+    fn test_use_grpc_transport() {
+        let mut config = Config::new_for_test();
+        // Default is "http" -> false
+        assert!(!config.use_grpc_transport());
+
+        config.internal_transport = "grpc".to_string();
+        assert!(config.use_grpc_transport());
+
+        // Case-insensitive
+        config.internal_transport = "GRPC".to_string();
+        assert!(config.use_grpc_transport());
+
+        config.internal_transport = "Grpc".to_string();
+        assert!(config.use_grpc_transport());
+
+        config.internal_transport = "http".to_string();
+        assert!(!config.use_grpc_transport());
+
+        config.internal_transport = "something_else".to_string();
+        assert!(!config.use_grpc_transport());
     }
 
     #[test]
