@@ -163,8 +163,12 @@ pub async fn delete_like(
     .await?;
 
     if result.rows_affected() > 0 {
-        // Decrement count atomically and return new total
-        let (count,): (i64,) = sqlx::query_as(
+        // Decrement count atomically and return new total.
+        //
+        // Use fetch_optional: a concurrent insert_like rollback (content validation
+        // failure) could delete the likes row we just deleted, AND if the like_counts
+        // row was never created (race on first-ever like), the UPDATE finds nothing.
+        let count: i64 = sqlx::query_scalar(
             r#"
             UPDATE like_counts
             SET total_count = GREATEST(total_count - 1, 0), updated_at = NOW()
@@ -174,8 +178,9 @@ pub async fn delete_like(
         )
         .bind(content_type)
         .bind(content_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
 
         tx.commit().await?;
         Ok(DeleteLikeResult {
