@@ -62,12 +62,13 @@ async fn restart_social_api() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Force recreate to get a clean container (use test overrides if present)
+    // Force recreate to get a clean container.
+    // Test binary CWD is crates/social-api/, so compose files are two levels up.
     let output = tokio::process::Command::new("docker")
         .args([
             "compose",
-            "-f", "docker-compose.yml",
-            "-f", "docker-compose.test.yml",
+            "-f", "../../docker-compose.yml",
+            "-f", "../../docker-compose.test.yml",
             "up", "-d", "--force-recreate", "social-api",
         ])
         .output()

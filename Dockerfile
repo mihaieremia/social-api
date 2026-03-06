@@ -1,10 +1,10 @@
 # Stage 1: Build
-FROM rust:latest AS builder
+FROM rust:1.90 AS builder
 
 WORKDIR /app
 
 # Copy workspace manifests first for dependency caching
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/social-api/Cargo.toml crates/social-api/Cargo.toml
 COPY crates/shared/Cargo.toml crates/shared/Cargo.toml
 COPY crates/mock-services/Cargo.toml crates/mock-services/Cargo.toml
@@ -12,6 +12,7 @@ COPY crates/mock-services/Cargo.toml crates/mock-services/Cargo.toml
 # Create dummy src files to build dependencies
 RUN mkdir -p crates/social-api/src crates/shared/src crates/mock-services/src && \
     echo "fn main() {}" > crates/social-api/src/main.rs && \
+    echo "" > crates/social-api/src/lib.rs && \
     echo "" > crates/shared/src/lib.rs && \
     echo "fn main() {}" > crates/mock-services/src/main.rs
 
@@ -23,9 +24,9 @@ COPY crates/ crates/
 COPY migrations/ migrations/
 
 # Touch main files to invalidate cache for source changes
-RUN touch crates/social-api/src/main.rs crates/shared/src/lib.rs
+RUN touch crates/social-api/src/main.rs crates/social-api/src/lib.rs crates/shared/src/lib.rs
 
-# Build the real binary
+# Build the real binary (profile.release in Cargo.toml: lto=fat, codegen-units=1, strip)
 RUN cargo build --release --bin social-api
 
 # Stage 2: Runtime

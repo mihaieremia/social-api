@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+coverage/
+.worktrees/
+
+# VCS
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.*
+
+# Documentation & plans (not needed in image)
+docs/
+*.md
+!migrations/**/*.md
+LICENSE
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI & local tooling
+k6/
+monitoring/
+.claude/

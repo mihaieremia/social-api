@@ -1,15 +1,16 @@
 # Stage 1: Build
-FROM rust:latest AS builder
+FROM rust:1.90 AS builder
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/social-api/Cargo.toml crates/social-api/Cargo.toml
 COPY crates/shared/Cargo.toml crates/shared/Cargo.toml
 COPY crates/mock-services/Cargo.toml crates/mock-services/Cargo.toml
 
 RUN mkdir -p crates/social-api/src crates/shared/src crates/mock-services/src && \
     echo "fn main() {}" > crates/social-api/src/main.rs && \
+    echo "" > crates/social-api/src/lib.rs && \
     echo "" > crates/shared/src/lib.rs && \
     echo "fn main() {}" > crates/mock-services/src/main.rs
 
@@ -20,6 +21,7 @@ COPY migrations/ migrations/
 
 RUN touch crates/mock-services/src/main.rs crates/shared/src/lib.rs
 
+# Build the real binary (profile.release in Cargo.toml: lto=fat, codegen-units=1, strip)
 RUN cargo build --release --bin mock-services
 
 # Stage 2: Runtime
