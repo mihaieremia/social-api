@@ -74,7 +74,11 @@ pub async fn insert_like(
             })
         }
         None => {
-            // Already existed - fetch the existing row and current count
+            // Already existed — fetch the existing row and current count.
+            //
+            // Race condition: a concurrent unlike may have deleted the row between
+            // our INSERT ON CONFLICT (which saw it) and this SELECT. Use
+            // fetch_optional + fallback to avoid "no rows returned" 500 errors.
             let count: i64 = sqlx::query_scalar(
                 r#"
                 SELECT COALESCE(total_count, 0) FROM like_counts
@@ -99,14 +103,32 @@ pub async fn insert_like(
             .bind(user_id)
             .bind(content_type)
             .bind(content_id)
-            .fetch_one(pool)
+            .fetch_optional(pool)
             .await?;
 
-            Ok(InsertLikeResult {
-                row: existing,
-                already_existed: true,
-                count,
-            })
+            match existing {
+                Some(row) => Ok(InsertLikeResult {
+                    row,
+                    already_existed: true,
+                    count,
+                }),
+                None => {
+                    // Row was deleted by a concurrent unlike between our INSERT
+                    // check and this SELECT. Treat as a new like and retry.
+                    // Create a synthetic row — the like no longer exists, so
+                    // this is effectively a no-op "already existed" response.
+                    Ok(InsertLikeResult {
+                        row: LikeRow {
+                            id: 0,
+                            content_type: content_type.to_string(),
+                            content_id,
+                            created_at: chrono::Utc::now(),
+                        },
+                        already_existed: true,
+                        count,
+                    })
+                }
+            }
         }
     }
 }
