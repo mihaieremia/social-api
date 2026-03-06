@@ -124,6 +124,26 @@ async fn refresh_window(
     Ok(())
 }
 
+/// Public wrappers for integration/stress tests.
+/// Not intended for production use — call `spawn_leaderboard_refresh` instead.
+#[allow(dead_code)]
+pub async fn refresh_all_windows_public(
+    db: &DbPools,
+    cache: &CacheManager,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    refresh_all_windows(db, cache).await
+}
+
+/// Public wrapper for single-window refresh (integration/stress tests).
+#[allow(dead_code)]
+pub async fn refresh_window_public(
+    db: &DbPools,
+    cache: &CacheManager,
+    window: TimeWindow,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    refresh_window(db, cache, window).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
