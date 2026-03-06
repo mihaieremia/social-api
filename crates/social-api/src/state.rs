@@ -33,7 +33,7 @@ struct AppStateInner {
 }
 
 impl AppState {
-    pub fn new(
+    pub async fn new(
         db: DbPools,
         cache: CacheManager,
         config: Config,
@@ -57,20 +57,75 @@ impl AppState {
             min_calls_for_rate: 10,
         }));
 
-        let token_validator: Box<dyn TokenValidator> = Box::new(HttpTokenValidator::new(
-            http_client.clone(),
-            config.profile_api_url.clone(),
-            cache.clone(),
-            config.cache_ttl_user_status_secs,
-        ));
+        let token_validator: Box<dyn TokenValidator> = if config.use_grpc_transport() {
+            match crate::clients::grpc_profile_client::GrpcTokenValidator::new(
+                &config.internal_grpc_url,
+                cache.clone(),
+                config.cache_ttl_user_status_secs,
+            )
+            .await
+            {
+                Ok(v) => {
+                    tracing::info!("Using gRPC transport for profile validation");
+                    Box::new(v)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to connect gRPC profile client, falling back to HTTP");
+                    Box::new(HttpTokenValidator::new(
+                        http_client.clone(),
+                        config.profile_api_url.clone(),
+                        cache.clone(),
+                        config.cache_ttl_user_status_secs,
+                    ))
+                }
+            }
+        } else {
+            Box::new(HttpTokenValidator::new(
+                http_client.clone(),
+                config.profile_api_url.clone(),
+                cache.clone(),
+                config.cache_ttl_user_status_secs,
+            ))
+        };
 
-        let like_service = LikeService::new(
-            db.clone(),
-            cache.clone(),
-            http_client.clone(),
-            config.clone(),
-            content_breaker.clone(),
-        );
+        let like_service = if config.use_grpc_transport() {
+            match crate::clients::grpc_content_client::GrpcContentValidator::new(
+                &config.internal_grpc_url,
+                cache.clone(),
+                config.clone(),
+            )
+            .await
+            {
+                Ok(v) => {
+                    tracing::info!("Using gRPC transport for content validation");
+                    LikeService::new_with_validator(
+                        db.clone(),
+                        cache.clone(),
+                        Arc::new(v),
+                        config.clone(),
+                        content_breaker.clone(),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to connect gRPC content client, falling back to HTTP");
+                    LikeService::new(
+                        db.clone(),
+                        cache.clone(),
+                        http_client.clone(),
+                        config.clone(),
+                        content_breaker.clone(),
+                    )
+                }
+            }
+        } else {
+            LikeService::new(
+                db.clone(),
+                cache.clone(),
+                http_client.clone(),
+                config.clone(),
+                content_breaker.clone(),
+            )
+        };
 
         let pubsub_manager = PubSubManager::new(
             config.redis_url.clone(),
@@ -213,7 +268,7 @@ mod tests {
         let cache = CacheManager::new(redis_pool);
 
         let shutdown_token = CancellationToken::new();
-        AppState::new(db, cache, config, shutdown_token)
+        AppState::new(db, cache, config, shutdown_token).await
     }
 
     #[tokio::test]

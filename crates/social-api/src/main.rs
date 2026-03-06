@@ -64,7 +64,8 @@ async fn main() {
         cache.clone(),
         config.clone(),
         shutdown_token.clone(),
-    );
+    )
+    .await;
 
     // ── 4. Spawn background tasks (cancellation-aware) ──
     let refresh_handle = tasks::leaderboard_refresh::spawn_leaderboard_refresh(

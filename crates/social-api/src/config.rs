@@ -12,8 +12,9 @@ pub struct Config {
     pub http_port: u16,
     pub grpc_port: u16,
     /// Transport for outgoing inter-service calls: "http" or "grpc"
-    #[allow(dead_code)]
     pub internal_transport: String,
+    /// gRPC endpoint for internal services (content + profile).
+    pub internal_grpc_url: String,
 
     // Content API URLs (keyed by content type)
     pub content_api_urls: HashMap<String, String>,
@@ -93,6 +94,8 @@ impl Config {
         let grpc_port: u16 = env_or_default("GRPC_PORT", 50051);
         let internal_transport =
             env::var("INTERNAL_TRANSPORT").unwrap_or_else(|_| "http".to_string());
+        let internal_grpc_url = env::var("INTERNAL_GRPC_URL")
+            .unwrap_or_else(|_| "http://mock-services:50052".to_string());
 
         // Build content API URL map from CONTENT_API_{TYPE}_URL env vars
         let content_api_urls = build_content_api_urls();
@@ -110,6 +113,7 @@ impl Config {
             http_port,
             grpc_port,
             internal_transport,
+            internal_grpc_url,
             content_api_urls,
             profile_api_url,
             db_max_connections: env_or_default("DB_MAX_CONNECTIONS", 20),
@@ -163,7 +167,6 @@ impl Config {
     }
 
     /// Check if gRPC transport is configured for internal calls.
-    #[allow(dead_code)]
     pub fn use_grpc_transport(&self) -> bool {
         self.internal_transport.eq_ignore_ascii_case("grpc")
     }
@@ -183,6 +186,7 @@ impl Config {
             http_port: 8080,
             grpc_port: 50051,
             internal_transport: "http".to_string(),
+            internal_grpc_url: "http://localhost:50052".to_string(),
             database_url: "postgres://social:social_password@localhost:5432/social_api_test"
                 .to_string(),
             read_database_url: "postgres://social:social_password@localhost:5432/social_api_test"
