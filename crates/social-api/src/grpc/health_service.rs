@@ -3,9 +3,6 @@
 //! Implements `social.v1.Health.Check` with database and Redis dependency
 //! checks, matching the HTTP `/health/ready` endpoint behavior.
 
-// Building block consumed when the gRPC server is mounted (Task 11).
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use tonic::{Request, Response, Status};

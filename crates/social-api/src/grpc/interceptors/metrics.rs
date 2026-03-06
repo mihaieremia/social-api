@@ -3,9 +3,6 @@
 //! Records request counts and latency histograms for gRPC methods,
 //! mirroring the HTTP metrics middleware.
 
-// Building block for gRPC service implementations (Task 8+).
-#![allow(dead_code)]
-
 use std::time::Instant;
 
 /// Record a completed gRPC request in Prometheus metrics.

@@ -10,7 +10,6 @@ pub struct Config {
     pub read_database_url: String,
     pub redis_url: String,
     pub http_port: u16,
-    #[allow(dead_code)]
     pub grpc_port: u16,
     /// Transport for outgoing inter-service calls: "http" or "grpc"
     #[allow(dead_code)]

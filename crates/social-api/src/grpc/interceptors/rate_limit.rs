@@ -5,9 +5,6 @@
 //! be a tonic interceptor (which is sync). Instead, gRPC service methods call
 //! this helper at the top of each handler.
 
-// Building block for gRPC service implementations (Task 8+).
-#![allow(dead_code)]
-
 use crate::cache::manager::CacheManager;
 use crate::middleware::rate_limit::{check_rate_limit_inner, fnv1a_hash};
 

@@ -3,10 +3,6 @@
 //! Every gRPC service method converts domain errors via `IntoStatus` or
 //! `app_error_to_status` so that clients receive idiomatic gRPC status codes.
 
-// All functions in this module are building blocks for the gRPC service
-// implementations (Task 8+). Allow dead_code until those consumers land.
-#![allow(dead_code)]
-
 use shared::errors::AppError;
 use tonic::Status;
 

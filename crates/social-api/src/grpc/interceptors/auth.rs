@@ -4,9 +4,6 @@
 //! `TokenValidator` trait + circuit breaker, mirroring the HTTP `AuthUser`
 //! extractor logic but adapted for tonic's async service method context.
 
-// Building block for gRPC service implementations (Task 8+).
-#![allow(dead_code)]
-
 use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
 

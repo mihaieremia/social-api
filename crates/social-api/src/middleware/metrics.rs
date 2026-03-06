@@ -125,6 +125,13 @@ pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
         "Database connection pool size by pool (writer/reader) and state (active/idle/max)"
     );
 
+    // gRPC metrics
+    metrics::describe_counter!("social_api_grpc_requests_total", "Total gRPC requests");
+    metrics::describe_histogram!(
+        "social_api_grpc_request_duration_seconds",
+        "gRPC request duration in seconds"
+    );
+
     handle
 }
 

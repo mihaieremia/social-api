@@ -9,10 +9,6 @@
 //!
 //! Zero business logic duplication -- all logic stays in `LikeService`.
 
-// This module is a building block consumed once the gRPC server is mounted
-// (Task 11: Dual Server Mounting). Allow dead_code until that consumer lands.
-#![allow(dead_code)]
-
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 

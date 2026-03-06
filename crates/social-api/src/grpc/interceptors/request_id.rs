@@ -3,9 +3,6 @@
 //! Generates or propagates a unique request identifier via gRPC metadata,
 //! mirroring the HTTP `X-Request-Id` middleware behavior.
 
-// Building block for gRPC service implementations (Task 8+).
-#![allow(dead_code)]
-
 use tonic::{Request, Status};
 
 use crate::middleware::request_id::fast_request_id;
@@ -15,7 +12,7 @@ const REQUEST_ID_KEY: &str = "x-request-id";
 /// Extension type inserted into `Request::extensions()` so gRPC service
 /// methods can retrieve the request ID without parsing metadata again.
 #[derive(Clone, Debug)]
-pub struct RequestIdExt(pub String);
+pub struct RequestIdExt(#[allow(dead_code)] pub String);
 
 /// Tonic interceptor that ensures every gRPC request has a unique request ID.
 ///

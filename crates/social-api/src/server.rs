@@ -8,9 +8,14 @@ use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::grpc::health_service::GrpcHealthService;
+use crate::grpc::interceptors::request_id::inject_request_id;
+use crate::grpc::likes_service::GrpcLikeService;
 use crate::handlers;
 use crate::middleware;
 use crate::openapi::ApiDoc;
+use crate::proto::social_v1::health_server::HealthServer;
+use crate::proto::social_v1::like_service_server::LikeServiceServer;
 use crate::state::AppState;
 
 /// Access log verbosity level (set via `ACCESS_LOG` env var).
@@ -192,4 +197,17 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .merge(metrics_route)
         .merge(api_routes)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+}
+
+/// Build the tonic gRPC server with all services and interceptors.
+pub fn build_grpc_server(state: AppState) -> tonic::transport::server::Router {
+    let like_service = GrpcLikeService::new(state.clone());
+    let health_service = GrpcHealthService::new(state);
+
+    tonic::transport::Server::builder()
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            LikeServiceServer::new(like_service),
+            inject_request_id,
+        ))
+        .add_service(HealthServer::new(health_service))
 }

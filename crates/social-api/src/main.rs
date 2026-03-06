@@ -80,21 +80,42 @@ async fn main() {
         shutdown_token.clone(),
     );
 
-    // ── 5. Build router and bind ──
+    // ── 5. Build router and bind HTTP ──
     let app = server::build_router(app_state.clone(), metrics_handle);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let listener = TcpListener::bind(addr)
         .await
-        .expect("Failed to bind to address");
+        .expect("Failed to bind HTTP address");
 
-    tracing::info!(port = config.http_port, "Social API listening");
+    tracing::info!(port = config.http_port, "HTTP server listening");
 
-    // ── 6. Serve with graceful shutdown ──
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_token.cancelled_owned())
-        .await
-        .expect("Server error");
+    // ── 5b. Build and bind gRPC server ──
+    let grpc_server = server::build_grpc_server(app_state.clone());
+    let grpc_addr = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
+
+    tracing::info!(port = config.grpc_port, "gRPC server listening");
+
+    // ── 6. Serve both HTTP and gRPC with graceful shutdown ──
+    let shutdown_token_http = shutdown_token.clone();
+    let shutdown_token_grpc = shutdown_token.clone();
+
+    let http_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_token_http.cancelled_owned())
+            .await
+            .expect("HTTP server error");
+    });
+
+    let grpc_handle = tokio::spawn(async move {
+        grpc_server
+            .serve_with_shutdown(grpc_addr, shutdown_token_grpc.cancelled_owned())
+            .await
+            .expect("gRPC server error");
+    });
+
+    // Wait for both servers to stop
+    let _ = tokio::join!(http_handle, grpc_handle);
 
     // ── 7. Drain in-flight requests (with timeout) ──
     tracing::info!("Server stopped accepting connections, draining in-flight requests...");
