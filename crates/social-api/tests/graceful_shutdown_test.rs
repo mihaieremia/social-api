@@ -67,9 +67,14 @@ async fn restart_social_api() {
     let output = tokio::process::Command::new("docker")
         .args([
             "compose",
-            "-f", "../../docker-compose.yml",
-            "-f", "../../docker-compose.test.yml",
-            "up", "-d", "--force-recreate", "social-api",
+            "-f",
+            "../../docker-compose.yml",
+            "-f",
+            "../../docker-compose.test.yml",
+            "up",
+            "-d",
+            "--force-recreate",
+            "social-api",
         ])
         .output()
         .await

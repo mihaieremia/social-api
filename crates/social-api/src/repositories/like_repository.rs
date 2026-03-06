@@ -544,22 +544,14 @@ mod tests {
         let id3 = Uuid::new_v4();
 
         for _ in 0..3 {
-            insert_like(&pool, Uuid::new_v4(), ct, id1)
-                .await
-                .unwrap();
+            insert_like(&pool, Uuid::new_v4(), ct, id1).await.unwrap();
         }
         for _ in 0..2 {
-            insert_like(&pool, Uuid::new_v4(), ct, id2)
-                .await
-                .unwrap();
+            insert_like(&pool, Uuid::new_v4(), ct, id2).await.unwrap();
         }
-        insert_like(&pool, Uuid::new_v4(), ct, id3)
-            .await
-            .unwrap();
+        insert_like(&pool, Uuid::new_v4(), ct, id3).await.unwrap();
 
-        let rows = get_leaderboard(&pool, Some(ct), None, 10)
-            .await
-            .unwrap();
+        let rows = get_leaderboard(&pool, Some(ct), None, 10).await.unwrap();
 
         assert_eq!(rows.len(), 3);
         assert!(rows[0].2 >= rows[1].2 && rows[1].2 >= rows[2].2);
