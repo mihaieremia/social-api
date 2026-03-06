@@ -144,18 +144,29 @@ function authHeaders(token) {
 //   At 100k rps with 10ms avg  → 1,000 VUs
 //   At 100k rps with 50ms avg  → 5,000 VUs
 //   At 100k rps with 200ms avg → 20,000 VUs (degraded)
-// We allocate generously to handle latency spikes.
+//
+// IMPORTANT: macOS has ~16K ephemeral ports (49152-65535) by default.
+// Even with k6-tune-macos expanding to ~64K ports, high VU counts cause
+// port exhaustion because TIME_WAIT sockets hold ports for seconds.
+// We cap total VUs to stay well within OS limits on localhost.
+// In production (Linux + separate load generator), remove the cap.
+
+// Max VUs per scenario (override: STRESS_MAX_VUS env var)
+// Default 2000 keeps total across 3 scenarios at ~5K, safe for macOS.
+const MAX_VUS_PER_SCENARIO = parseInt(__ENV.STRESS_MAX_VUS || '2000');
 
 // Helper: proportional RPS based on target
 function rps(fraction) {
   return Math.max(1, Math.round(TARGET_RPS * fraction));
 }
 
-// Helper: VU allocation based on RPS (assumes ~50ms avg under stress)
+// Helper: VU allocation based on RPS, capped to avoid port exhaustion
 function vusFor(targetRps) {
+  const pre = Math.max(10, Math.round(targetRps * 0.05));
+  const max = Math.max(50, Math.round(targetRps * 0.2));
   return {
-    preAllocatedVUs: Math.max(10, Math.round(targetRps * 0.05)),
-    maxVUs: Math.max(50, Math.round(targetRps * 0.2)),
+    preAllocatedVUs: Math.min(pre, Math.round(MAX_VUS_PER_SCENARIO * 0.25)),
+    maxVUs: Math.min(max, MAX_VUS_PER_SCENARIO),
   };
 }
 
@@ -356,8 +367,8 @@ const BREAKPOINT_SCENARIOS = {
       { duration: '5m', target: 100000 },  // hold at max
       { duration: '2m', target: 0 },
     ],
-    preAllocatedVUs: 500,
-    maxVUs: 20000,
+    preAllocatedVUs: Math.min(500, Math.round(MAX_VUS_PER_SCENARIO * 0.25)),
+    maxVUs: MAX_VUS_PER_SCENARIO,
     gracefulStop: '30s',
     tags: { scenario: 'breakpoint_mixed' },
   },
