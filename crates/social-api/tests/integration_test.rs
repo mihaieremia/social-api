@@ -530,13 +530,37 @@ async fn test_concurrent_likes_race_condition() {
         TOKEN_USER_5,
     ];
 
-    // Ensure clean state: unlike for all 5 users before the test
-    for token in &tokens {
+    // Ensure clean state: unlike for ALL known users (not just the 5 test tokens).
+    // k6 load tests use tokens tok_user_1..tok_user_20 and may leave likes on
+    // this content_id. We must clear every possible like so like_counts reaches 0.
+    let all_tokens = [
+        "tok_user_1",
+        "tok_user_2",
+        "tok_user_3",
+        "tok_user_4",
+        "tok_user_5",
+        "tok_user_6",
+        "tok_user_7",
+        "tok_user_8",
+        "tok_user_9",
+        "tok_user_10",
+        "tok_user_11",
+        "tok_user_12",
+        "tok_user_13",
+        "tok_user_14",
+        "tok_user_15",
+        "tok_user_16",
+        "tok_user_17",
+        "tok_user_18",
+        "tok_user_19",
+        "tok_user_20",
+    ];
+    for token in &all_tokens {
         let _ = client()
             .delete(format!(
                 "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}"
             ))
-            .header("Authorization", auth_header(token))
+            .header("Authorization", format!("Bearer {token}"))
             .send()
             .await;
     }
@@ -544,16 +568,20 @@ async fn test_concurrent_likes_race_condition() {
     // Allow cache to settle after cleanup
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Read baseline count (may be non-zero from previous test runs or k6 load tests)
-    let baseline_resp = client()
+    // Verify count is 0 before proceeding
+    let pre_resp = client()
         .get(format!(
             "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}/count"
         ))
         .send()
         .await
         .unwrap();
-    let baseline_body: Value = baseline_resp.json().await.unwrap();
-    let baseline_count = baseline_body["count"].as_i64().unwrap_or(0);
+    let pre_body: Value = pre_resp.json().await.unwrap();
+    assert_eq!(
+        pre_body["count"], 0,
+        "Expected count=0 after full cleanup, got {}",
+        pre_body["count"]
+    );
 
     // Fire 5 concurrent like requests, one per user
     let futures: Vec<_> = tokens
@@ -587,7 +615,7 @@ async fn test_concurrent_likes_race_condition() {
         );
     }
 
-    // Final count must be baseline + 5 — no phantom duplicates
+    // Final count must be exactly 5 — no phantom duplicates
     let count_resp = client()
         .get(format!(
             "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}/count"
@@ -597,10 +625,9 @@ async fn test_concurrent_likes_race_condition() {
         .unwrap();
     assert_eq!(count_resp.status(), 200);
     let body: Value = count_resp.json().await.unwrap();
-    let expected = baseline_count + 5;
     assert_eq!(
-        body["count"], expected,
-        "Expected count={expected} (baseline {baseline_count} + 5 concurrent likes), got {}",
+        body["count"], 5,
+        "Expected count=5 after 5 concurrent likes, got {}",
         body["count"]
     );
 
