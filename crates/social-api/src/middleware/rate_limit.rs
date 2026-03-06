@@ -256,16 +256,12 @@ fn fnv1a_hash(input: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
 
     // --- Pure function tests (no infrastructure needed) ---
 
     #[test]
     fn test_extract_rightmost_ip_from_forwarded_for() {
-        assert_eq!(
-            extract_real_ip("1.1.1.1, 2.2.2.2, 10.0.0.1"),
-            "10.0.0.1"
-        );
+        assert_eq!(extract_real_ip("1.1.1.1, 2.2.2.2, 10.0.0.1"), "10.0.0.1");
         assert_eq!(extract_real_ip("192.168.1.100"), "192.168.1.100");
         assert_eq!(extract_real_ip("  1.2.3.4  ,  5.6.7.8  "), "5.6.7.8");
     }
@@ -314,20 +310,19 @@ mod tests {
         assert!(response.headers().get("Retry-After").is_some());
     }
 
-    // --- Redis Lua script tests (testcontainers) ---
+    // --- Redis Lua script tests (shared container) ---
+
+    async fn make_cache() -> CacheManager {
+        let redis = crate::test_containers::shared_redis().await;
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = redis.url.clone();
+        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
+        CacheManager::new(pool)
+    }
 
     #[tokio::test]
     async fn test_sliding_window_allows_under_limit() {
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let port = redis.get_host_port_ipv4(6379).await.unwrap();
-
-        let mut config = crate::config::Config::new_for_test();
-        config.redis_url = format!("redis://127.0.0.1:{port}");
-        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
-        let cache = CacheManager::new(pool);
+        let cache = make_cache().await;
 
         let result = check_rate_limit_inner(&cache, "rl:test:allow", 10, 60).await;
         assert!(result.allowed);
@@ -337,16 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sliding_window_blocks_over_limit() {
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let port = redis.get_host_port_ipv4(6379).await.unwrap();
-
-        let mut config = crate::config::Config::new_for_test();
-        config.redis_url = format!("redis://127.0.0.1:{port}");
-        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
-        let cache = CacheManager::new(pool);
+        let cache = make_cache().await;
 
         // Exhaust the limit of 3
         for _ in 0..3 {

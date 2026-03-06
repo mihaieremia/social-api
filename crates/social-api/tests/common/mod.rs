@@ -13,7 +13,8 @@ use http_body_util::BodyExt as _;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use testcontainers::runners::AsyncRunner;
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -28,6 +29,52 @@ use social_api::server::build_router;
 use social_api::services::like_service::LikeService;
 use social_api::state::AppState;
 
+// ── Shared containers for integration tests ──────────────────────────────────
+
+struct SharedContainers {
+    _pg: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+    _redis: testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+    db_url: String,
+    redis_url: String,
+}
+
+static CONTAINERS: OnceCell<SharedContainers> = OnceCell::const_new();
+
+async fn shared_containers() -> &'static SharedContainers {
+    CONTAINERS
+        .get_or_init(|| async {
+            let pg = testcontainers_modules::postgres::Postgres::default()
+                .start()
+                .await
+                .expect("postgres container");
+            let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
+            let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+
+            let redis = testcontainers_modules::redis::Redis::default()
+                .start()
+                .await
+                .expect("redis container");
+            let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
+            let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+            // Run migrations once
+            let pool = sqlx::PgPool::connect(&db_url).await.expect("pg connect");
+            sqlx::migrate!("../../migrations")
+                .run(&pool)
+                .await
+                .expect("migrations");
+            pool.close().await;
+
+            SharedContainers {
+                _pg: pg,
+                _redis: redis,
+                db_url,
+                redis_url,
+            }
+        })
+        .await
+}
+
 /// A fully wired axum router backed by real Postgres + Redis containers.
 pub struct TestApp {
     pub router: axum::Router,
@@ -35,30 +82,14 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new() -> Self {
-        let pg = testcontainers_modules::postgres::Postgres::default()
-            .start()
-            .await
-            .expect("failed to start postgres container");
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("failed to start redis container");
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+        let containers = shared_containers().await;
 
         let mut config = Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
-        config.redis_url = redis_url;
+        config.database_url = containers.db_url.clone();
+        config.read_database_url = containers.db_url.clone();
+        config.redis_url = containers.redis_url.clone();
 
         let db = DbPools::from_config(&config).await.expect("db pools");
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("migrations");
 
         let redis_pool = create_pool(&config).await.expect("redis pool");
         let cache = CacheManager::new(redis_pool);
@@ -92,14 +123,7 @@ impl TestApp {
             like_service,
         );
 
-        let metrics_handle = PrometheusBuilder::new()
-            .build_recorder()
-            .handle();
-
-        // Keep containers alive for the full test duration by leaking them.
-        // This is acceptable in tests — the OS reclaims memory on exit.
-        Box::leak(Box::new(pg));
-        Box::leak(Box::new(redis));
+        let metrics_handle = PrometheusBuilder::new().build_recorder().handle();
 
         let router = build_router(state, metrics_handle);
         TestApp { router }
@@ -136,11 +160,7 @@ pub struct TestContentValidator;
 
 #[async_trait::async_trait]
 impl ContentValidator for TestContentValidator {
-    async fn validate(
-        &self,
-        _content_type: &str,
-        _content_id: Uuid,
-    ) -> Result<bool, AppError> {
+    async fn validate(&self, _content_type: &str, _content_id: Uuid) -> Result<bool, AppError> {
         Ok(true)
     }
 }
@@ -181,11 +201,6 @@ pub fn get_request(uri: &str, user_id: Option<Uuid>) -> Request<Body> {
 
 /// Collect the full response body and deserialize it as JSON.
 pub async fn body_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }

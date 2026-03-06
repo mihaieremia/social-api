@@ -78,30 +78,17 @@ fn record_pool_metrics(db: &DbPools, max_connections: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
     use tokio_util::sync::CancellationToken;
 
-    /// Spin up a Postgres testcontainer, run migrations, and return DbPools + the container.
-    async fn setup_db() -> (
-        DbPools,
-        testcontainers::ContainerAsync<Postgres>,
-    ) {
-        let pg = Postgres::default().start().await.expect("postgres container");
-        let port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    /// Return DbPools connected to the shared Postgres container.
+    async fn setup_db() -> DbPools {
+        let pg = crate::test_containers::shared_pg().await;
 
         let mut config = crate::config::Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
+        config.database_url = pg.url.clone();
+        config.read_database_url = pg.url.clone();
 
-        let db = DbPools::from_config(&config).await.expect("db pools");
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("run migrations");
-
-        (db, pg)
+        DbPools::from_config(&config).await.expect("db pools")
     }
 
     // -------------------------------------------------------------------------
@@ -110,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_pool_metrics_does_not_panic() {
-        let (db, _pg) = setup_db().await;
+        let db = setup_db().await;
         // Should complete without panicking regardless of whether a metrics
         // recorder is installed (metrics crate no-ops when none is registered).
         record_pool_metrics(&db, 5);
@@ -122,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_pool_metrics_various_max_connections() {
-        let (db, _pg) = setup_db().await;
+        let db = setup_db().await;
         for max in [1, 5, 20, 100] {
             record_pool_metrics(&db, max);
         }
@@ -134,7 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_db_pool_metrics_cancels_on_shutdown() {
-        let (db, _pg) = setup_db().await;
+        let db = setup_db().await;
 
         let config = crate::config::Config::new_for_test();
         let shutdown_token = CancellationToken::new();
@@ -157,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_size_values_are_sane() {
-        let (db, _pg) = setup_db().await;
+        let db = setup_db().await;
 
         // Verify the pool size metrics are readable without overflow
         let writer_total = db.writer.size();

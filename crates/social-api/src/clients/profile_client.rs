@@ -50,12 +50,12 @@ impl HttpTokenValidator {
 impl TokenValidator for HttpTokenValidator {
     async fn validate(&self, token: &str) -> Result<AuthenticatedUser, AppError> {
         let cache_key = Self::token_cache_key(token);
-        if let Some(cached_json) = self.cache.get(&cache_key).await {
-            if let Ok(user) = serde_json::from_str::<AuthenticatedUser>(&cached_json) {
-                return Ok(user);
-            }
-            // Corrupted cache entry — fall through to live validation
+        if let Some(cached_json) = self.cache.get(&cache_key).await
+            && let Ok(user) = serde_json::from_str::<AuthenticatedUser>(&cached_json)
+        {
+            return Ok(user);
         }
+        // Corrupted cache entry — fall through to live validation
 
         let url = format!("{}/v1/auth/validate", self.profile_api_url);
 

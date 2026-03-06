@@ -92,6 +92,9 @@ mod tests {
             .await
             .is_ok();
 
-        assert!(completed, "cancelled() should resolve immediately after cancel()");
+        assert!(
+            completed,
+            "cancelled() should resolve immediately after cancel()"
+        );
     }
 }

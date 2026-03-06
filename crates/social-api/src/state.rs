@@ -10,6 +10,7 @@ use crate::clients::profile_client::{HttpTokenValidator, TokenValidator};
 use crate::config::Config;
 use crate::db::DbPools;
 use crate::services::like_service::LikeService;
+use crate::services::pubsub_manager::PubSubManager;
 
 /// Shared application state, passed to all handlers via Axum's State extractor.
 /// Wrapped in Arc for cheap cloning across handler tasks.
@@ -26,6 +27,7 @@ struct AppStateInner {
     like_service: LikeService,
     token_validator: Box<dyn TokenValidator>,
     profile_breaker: Arc<CircuitBreaker>,
+    pubsub_manager: PubSubManager,
     shutdown_token: CancellationToken,
     inflight_count: AtomicUsize,
 }
@@ -48,7 +50,7 @@ impl AppState {
             recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
             success_threshold: config.circuit_breaker_success_threshold,
             service_name: "profile_api".to_string(),
-            rate_window: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
             failure_rate_threshold: 0.5,
             min_calls_for_rate: 10,
         }));
@@ -58,13 +60,17 @@ impl AppState {
             recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
             success_threshold: config.circuit_breaker_success_threshold,
             service_name: "content_api".to_string(),
-            rate_window: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+            rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
             failure_rate_threshold: 0.5,
             min_calls_for_rate: 10,
         }));
 
-        let token_validator: Box<dyn TokenValidator> =
-            Box::new(HttpTokenValidator::new(http_client.clone(), config.profile_api_url.clone()));
+        let token_validator: Box<dyn TokenValidator> = Box::new(HttpTokenValidator::new(
+            http_client.clone(),
+            config.profile_api_url.clone(),
+            cache.clone(),
+            config.cache_ttl_user_status_secs,
+        ));
 
         let like_service = LikeService::new(
             db.clone(),
@@ -73,6 +79,9 @@ impl AppState {
             config.clone(),
             content_breaker.clone(),
         );
+
+        let pubsub_manager =
+            PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
 
         Self {
             inner: Arc::new(AppStateInner {
@@ -83,6 +92,7 @@ impl AppState {
                 like_service,
                 token_validator,
                 profile_breaker,
+                pubsub_manager,
                 shutdown_token,
                 inflight_count: AtomicUsize::new(0),
             }),
@@ -117,6 +127,10 @@ impl AppState {
         &self.inner.profile_breaker
     }
 
+    pub fn pubsub_manager(&self) -> &PubSubManager {
+        &self.inner.pubsub_manager
+    }
+
     pub fn shutdown_token(&self) -> &CancellationToken {
         &self.inner.shutdown_token
     }
@@ -134,44 +148,64 @@ impl AppState {
     }
 
     /// Expose `inflight_count` atomically for tests and shutdown drain.
+    #[allow(dead_code)]
     pub fn inflight_count_arc(&self) -> usize {
         self.inflight_count()
+    }
+
+    #[allow(dead_code)]
+    pub fn new_for_test(
+        db: DbPools,
+        cache: CacheManager,
+        config: Config,
+        shutdown_token: CancellationToken,
+        token_validator: Box<dyn TokenValidator>,
+        like_service: LikeService,
+    ) -> Self {
+        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: config.circuit_breaker_failure_threshold,
+            recovery_timeout: std::time::Duration::from_secs(
+                config.circuit_breaker_recovery_timeout_secs,
+            ),
+            success_threshold: config.circuit_breaker_success_threshold,
+            service_name: "profile_api".to_string(),
+            rate_window: std::time::Duration::from_secs(config.circuit_breaker_rate_window_secs),
+            failure_rate_threshold: 0.5,
+            min_calls_for_rate: 10,
+        }));
+        let http_client = reqwest::Client::new();
+        let pubsub_manager =
+            PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
+        Self {
+            inner: Arc::new(AppStateInner {
+                db,
+                cache,
+                config,
+                http_client,
+                like_service,
+                token_validator,
+                profile_breaker,
+                pubsub_manager,
+                shutdown_token,
+                inflight_count: AtomicUsize::new(0),
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
-
-    #[tokio::test]
-    async fn test_new_constructs_successfully_with_real_infra() {
-        // Start Postgres container
-        let pg = testcontainers_modules::postgres::Postgres::default()
-            .start()
-            .await
-            .expect("postgres container");
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-        // Start Redis container
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{redis_port}");
+    async fn make_state() -> AppState {
+        let pg = crate::test_containers::shared_pg().await;
+        let redis = crate::test_containers::shared_redis().await;
 
         let mut config = Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
-        config.redis_url = redis_url;
+        config.database_url = pg.url.clone();
+        config.read_database_url = pg.url.clone();
+        config.redis_url = redis.url.clone();
 
         let db = DbPools::from_config(&config).await.expect("db pools");
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("migrations");
 
         let redis_pool = crate::cache::manager::create_pool(&config)
             .await
@@ -179,7 +213,12 @@ mod tests {
         let cache = CacheManager::new(redis_pool);
 
         let shutdown_token = CancellationToken::new();
-        let state = AppState::new(db, cache, config, shutdown_token);
+        AppState::new(db, cache, config, shutdown_token)
+    }
+
+    #[tokio::test]
+    async fn test_new_constructs_successfully_with_real_infra() {
+        let state = make_state().await;
 
         // Test inflight counter
         assert_eq!(state.inflight_count(), 0);
@@ -212,35 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_appstate_clone_shares_inflight_counter() {
-        let pg = testcontainers_modules::postgres::Postgres::default()
-            .start()
-            .await
-            .expect("postgres container");
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-        let mut config = Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
-        config.redis_url = redis_url;
-
-        let db = DbPools::from_config(&config).await.expect("db pools");
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("migrations");
-        let redis_pool = crate::cache::manager::create_pool(&config)
-            .await
-            .expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
-        let shutdown_token = CancellationToken::new();
-        let state = AppState::new(db, cache, config, shutdown_token);
+        let state = make_state().await;
 
         // Clone shares same Arc
         let state2 = state.clone();
@@ -250,70 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_appstate_inflight_count_arc() {
-        let pg = testcontainers_modules::postgres::Postgres::default()
-            .start()
-            .await
-            .expect("postgres container");
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-        let mut config = Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
-        config.redis_url = redis_url;
-
-        let db = DbPools::from_config(&config).await.expect("db pools");
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("migrations");
-        let redis_pool = crate::cache::manager::create_pool(&config)
-            .await
-            .expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
-        let shutdown_token = CancellationToken::new();
-        let state = AppState::new(db, cache, config, shutdown_token);
+        let state = make_state().await;
         assert_eq!(state.inflight_count_arc(), 0);
-    }
-}
-
-impl AppState {
-    pub fn new_for_test(
-        db: DbPools,
-        cache: CacheManager,
-        config: Config,
-        shutdown_token: CancellationToken,
-        token_validator: Box<dyn TokenValidator>,
-        like_service: LikeService,
-    ) -> Self {
-        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-            failure_threshold: config.circuit_breaker_failure_threshold,
-            recovery_timeout: std::time::Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
-            success_threshold: config.circuit_breaker_success_threshold,
-            service_name: "profile_api".to_string(),
-            rate_window: std::time::Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
-            failure_rate_threshold: 0.5,
-            min_calls_for_rate: 10,
-        }));
-        let http_client = reqwest::Client::new();
-        Self {
-            inner: Arc::new(AppStateInner {
-                db,
-                cache,
-                config,
-                http_client,
-                like_service,
-                token_validator,
-                profile_breaker,
-                shutdown_token,
-                inflight_count: AtomicUsize::new(0),
-            }),
-        }
     }
 }

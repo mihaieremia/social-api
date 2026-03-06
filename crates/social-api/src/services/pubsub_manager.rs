@@ -236,28 +236,16 @@ async fn run_single_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
-
-    /// Start a Redis testcontainer and return a PubSubManager + the URL + the container.
-    /// The container must be kept alive for the duration of the test.
-    async fn make_manager() -> (
-        PubSubManager,
-        String,
-        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    ) {
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{port}");
-        let mgr = PubSubManager::new(redis_url.clone(), 16);
-        (mgr, redis_url, redis)
+    /// Return a PubSubManager + the Redis URL, backed by the shared container.
+    async fn make_manager() -> (PubSubManager, String) {
+        let redis = crate::test_containers::shared_redis().await;
+        let mgr = PubSubManager::new(redis.url.clone(), 16);
+        (mgr, redis.url.clone())
     }
 
     #[tokio::test]
     async fn test_subscribe_and_receive_message() {
-        let (mgr, redis_url, _redis) = make_manager().await;
+        let (mgr, redis_url) = make_manager().await;
         let channel = "test:pubsub:recv";
 
         let mut rx = mgr.subscribe(channel).await.expect("subscribe");
@@ -292,7 +280,7 @@ mod tests {
         // This test verifies the DashMap channel-reuse logic.
         // We use a real Redis container so the bridge can connect and stay alive
         // long enough for the second subscribe to hit the fast path.
-        let (mgr, _redis_url, _redis) = make_manager().await;
+        let (mgr, _redis_url) = make_manager().await;
         let channel = "test:pubsub:reuse";
 
         let _rx1 = mgr.subscribe(channel).await.expect("subscribe 1");
@@ -309,8 +297,14 @@ mod tests {
         // No real Redis needed: subscribe() always succeeds (bridge reconnects in bg).
         let mgr = PubSubManager::new("redis://127.0.0.1:19998".to_string(), 16);
 
-        let _rx1 = mgr.subscribe("test:pubsub:ch1").await.expect("subscribe ch1");
-        let _rx2 = mgr.subscribe("test:pubsub:ch2").await.expect("subscribe ch2");
+        let _rx1 = mgr
+            .subscribe("test:pubsub:ch1")
+            .await
+            .expect("subscribe ch1");
+        let _rx2 = mgr
+            .subscribe("test:pubsub:ch2")
+            .await
+            .expect("subscribe ch2");
 
         assert_eq!(mgr.active_channels(), 2);
     }
@@ -332,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_messages_delivered_in_order() {
-        let (mgr, redis_url, _redis) = make_manager().await;
+        let (mgr, redis_url) = make_manager().await;
         let channel = "test:pubsub:ordered";
 
         let mut rx = mgr.subscribe(channel).await.expect("subscribe");

@@ -15,6 +15,9 @@ mod shutdown;
 mod state;
 mod tasks;
 
+#[cfg(test)]
+mod test_containers;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;

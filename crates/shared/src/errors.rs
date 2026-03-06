@@ -444,7 +444,10 @@ mod tests {
             ErrorCode::InvalidWindow
         );
         assert_eq!(
-            AppError::RateLimited { retry_after_secs: 5 }.error_code(),
+            AppError::RateLimited {
+                retry_after_secs: 5
+            }
+            .error_code(),
             ErrorCode::RateLimited
         );
         assert_eq!(
@@ -476,7 +479,10 @@ mod tests {
         let e = AppError::InvalidContentId("bad-id".to_string());
         assert!(e.to_string().contains("Invalid content ID"));
 
-        let e = AppError::BatchTooLarge { size: 150, max: 100 };
+        let e = AppError::BatchTooLarge {
+            size: 150,
+            max: 100,
+        };
         assert!(e.to_string().contains("150"));
         assert!(e.to_string().contains("100"));
 
@@ -486,7 +492,9 @@ mod tests {
         let e = AppError::InvalidWindow("bad".to_string());
         assert!(e.to_string().contains("Invalid time window"));
 
-        let e = AppError::RateLimited { retry_after_secs: 30 };
+        let e = AppError::RateLimited {
+            retry_after_secs: 30,
+        };
         assert!(e.to_string().contains("Rate limited"));
 
         let e = AppError::DependencyUnavailable("svc".to_string());

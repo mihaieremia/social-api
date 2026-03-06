@@ -120,7 +120,10 @@ impl Config {
                 "CIRCUIT_BREAKER_SUCCESS_THRESHOLD",
                 3,
             ),
-            circuit_breaker_rate_window_secs: env_or_default("CIRCUIT_BREAKER_RATE_WINDOW_SECS", 30),
+            circuit_breaker_rate_window_secs: env_or_default(
+                "CIRCUIT_BREAKER_RATE_WINDOW_SECS",
+                30,
+            ),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
             sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 128),
@@ -143,6 +146,7 @@ impl Config {
     }
 
     /// Minimal config for unit/integration tests — does NOT read environment variables.
+    #[allow(dead_code)]
     pub fn new_for_test() -> Self {
         let mut content_api_urls = std::collections::HashMap::new();
         content_api_urls.insert("post".to_string(), "http://localhost:8081".to_string());
@@ -286,7 +290,10 @@ mod tests {
     fn test_content_api_url_returns_url_for_known_type() {
         let config = Config::new_for_test();
         assert!(config.content_api_url("post").is_some());
-        assert_eq!(config.content_api_url("post"), Some("http://localhost:8081"));
+        assert_eq!(
+            config.content_api_url("post"),
+            Some("http://localhost:8081")
+        );
     }
 
     #[test]

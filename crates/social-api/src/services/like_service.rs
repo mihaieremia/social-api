@@ -52,6 +52,7 @@ impl LikeService {
 
     /// Test constructor — accepts a pre-built ContentValidator trait object.
     /// Production code uses `new()` which builds `HttpContentValidator`.
+    #[allow(dead_code)]
     pub fn new_with_validator(
         db: DbPools,
         cache: CacheManager,
@@ -130,7 +131,8 @@ impl LikeService {
                 "social_api_likes_total",
                 "content_type" => content_type.to_string(),
                 "operation" => "like",
-            ).increment(1);
+            )
+            .increment(1);
         }
 
         Ok(LikeActionResponse {
@@ -181,7 +183,8 @@ impl LikeService {
                 "social_api_likes_total",
                 "content_type" => content_type.to_string(),
                 "operation" => "unlike",
-            ).increment(1);
+            )
+            .increment(1);
         }
 
         Ok(LikeActionResponse {
@@ -562,11 +565,35 @@ impl LikeService {
     }
 }
 
+/// Parse a sorted-set member string `"content_type:content_id"` back into a
+/// `TopLikedItem`. Returns `None` (and logs a warning) when the format is
+/// unexpected so a single corrupt entry does not break the response.
+fn parse_leaderboard_member(member: &str, score: f64) -> Option<TopLikedItem> {
+    let colon_pos = member.find(':')?;
+    let ct = &member[..colon_pos];
+    let cid_str = &member[colon_pos + 1..];
+
+    match Uuid::parse_str(cid_str) {
+        Ok(cid) => Some(TopLikedItem {
+            content_type: ct.to_string(),
+            content_id: cid,
+            count: score as i64,
+        }),
+        Err(e) => {
+            tracing::warn!(
+                member = member,
+                error = %e,
+                "Invalid UUID in leaderboard cache member"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use testcontainers::runners::AsyncRunner;
     use uuid::Uuid;
 
     // -------------------------------------------------------------------------
@@ -592,60 +619,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Setup helper
+    // Setup helper (reuses shared containers from test_containers module)
     // -------------------------------------------------------------------------
 
-    /// Start postgres + redis testcontainers and return a LikeService + the
-    /// containers (which must be kept alive for the duration of the test).
-    async fn make_service(
-        validator: Arc<dyn ContentValidator>,
-    ) -> (
-        LikeService,
-        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
-        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    ) {
-        // Postgres
-        let pg = testcontainers_modules::postgres::Postgres::default()
-            .start()
-            .await
-            .expect("postgres container");
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!(
-            "postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres"
-        );
+    async fn make_service(validator: Arc<dyn ContentValidator>) -> LikeService {
+        let pg = crate::test_containers::shared_pg().await;
+        let redis = crate::test_containers::shared_redis().await;
 
-        // Redis
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-        let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-        // Config
         let mut config = crate::config::Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url.clone();
-        config.redis_url = redis_url;
+        config.database_url = pg.url.clone();
+        config.read_database_url = pg.url.clone();
+        config.redis_url = redis.url.clone();
 
-        // DB pools
         let db = crate::db::DbPools::from_config(&config)
             .await
             .expect("db pools");
 
-        // Run migrations
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("migrations");
-
-        // Redis pool + cache
         let redis_pool = crate::cache::manager::create_pool(&config)
             .await
             .expect("redis pool");
         let cache = crate::cache::manager::CacheManager::new(redis_pool);
 
-        // Circuit breaker (permissive for tests)
         let cb_config = crate::clients::circuit_breaker::CircuitBreakerConfig {
             failure_threshold: 100,
             recovery_timeout: std::time::Duration::from_secs(1),
@@ -655,10 +649,11 @@ mod tests {
             failure_rate_threshold: 1.0,
             min_calls_for_rate: 1000,
         };
-        let content_breaker = Arc::new(crate::clients::circuit_breaker::CircuitBreaker::new(cb_config));
+        let content_breaker = Arc::new(crate::clients::circuit_breaker::CircuitBreaker::new(
+            cb_config,
+        ));
 
-        let svc = LikeService::new_with_validator(db, cache, validator, config, content_breaker);
-        (svc, pg, redis)
+        LikeService::new_with_validator(db, cache, validator, config, content_breaker)
     }
 
     // -------------------------------------------------------------------------
@@ -667,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_like_new_content_increments_count() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -685,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_like_duplicate_is_idempotent() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -705,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_like_invalid_content_rolls_back() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysInvalidContent)).await;
+        let svc = make_service(Arc::new(AlwaysInvalidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -726,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unlike_decrements_count() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -746,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unlike_not_liked_is_idempotent() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -761,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_count_cache_hit() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -780,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_counts_returns_correct_values() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id_a = Uuid::new_v4();
         let content_id_b = Uuid::new_v4();
@@ -795,8 +790,14 @@ mod tests {
         let results = svc.batch_counts(&items).await.unwrap();
 
         assert_eq!(results.len(), 2);
-        let a = results.iter().find(|r| r.content_id == content_id_a).unwrap();
-        let b = results.iter().find(|r| r.content_id == content_id_b).unwrap();
+        let a = results
+            .iter()
+            .find(|r| r.content_id == content_id_a)
+            .unwrap();
+        let b = results
+            .iter()
+            .find(|r| r.content_id == content_id_b)
+            .unwrap();
         assert_eq!(a.count, 1);
         assert_eq!(b.count, 0);
     }
@@ -807,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_counts_too_large_returns_error() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
 
         let items: Vec<(String, Uuid)> = (0..101)
             .map(|_| ("post".to_string(), Uuid::new_v4()))
@@ -815,7 +816,13 @@ mod tests {
 
         let err = svc.batch_counts(&items).await.unwrap_err();
         assert!(
-            matches!(err, AppError::BatchTooLarge { size: 101, max: 100 }),
+            matches!(
+                err,
+                AppError::BatchTooLarge {
+                    size: 101,
+                    max: 100
+                }
+            ),
             "expected BatchTooLarge, got: {err:?}"
         );
     }
@@ -826,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_leaderboard_returns_ok() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
 
         let resp = svc
             .get_leaderboard(None, TimeWindow::All, 10)
@@ -844,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_likes_pagination() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
 
         // Like 3 distinct content items
@@ -872,7 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_statuses_returns_correct_status() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let liked_id = Uuid::new_v4();
         let not_liked_id = Uuid::new_v4();
@@ -887,7 +894,10 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         let liked = results.iter().find(|r| r.content_id == liked_id).unwrap();
-        let not_liked = results.iter().find(|r| r.content_id == not_liked_id).unwrap();
+        let not_liked = results
+            .iter()
+            .find(|r| r.content_id == not_liked_id)
+            .unwrap();
         assert!(liked.liked);
         assert!(liked.liked_at.is_some());
         assert!(!not_liked.liked);
@@ -900,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stampede_coalescing() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let svc = Arc::new(svc);
         let content_id = Uuid::new_v4();
 
@@ -908,9 +918,7 @@ mod tests {
         let handles: Vec<_> = (0..5)
             .map(|_| {
                 let svc = Arc::clone(&svc);
-                tokio::spawn(async move {
-                    svc.get_count("post", content_id).await
-                })
+                tokio::spawn(async move { svc.get_count("post", content_id).await })
             })
             .collect();
 
@@ -930,20 +938,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_leaderboard_with_content_type_filter() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let post_id = Uuid::new_v4();
 
-        svc.like(user_id, "post", post_id).await.unwrap();
+        // Use a unique content_type so shared-DB data from other tests is excluded
+        svc.like(user_id, "lb_svc_test", post_id).await.unwrap();
 
         // Content_type filter always bypasses cache -> DB fallback
         let resp = svc
-            .get_leaderboard(Some("post"), TimeWindow::All, 10)
+            .get_leaderboard(Some("lb_svc_test"), TimeWindow::All, 10)
             .await
             .unwrap();
 
         assert_eq!(resp.window, "all");
-        assert_eq!(resp.content_type, Some("post".to_string()));
+        assert_eq!(resp.content_type, Some("lb_svc_test".to_string()));
         assert!(!resp.items.is_empty(), "expected at least one item");
         assert_eq!(resp.items[0].count, 1);
     }
@@ -954,15 +963,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_leaderboard_from_cache() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let content_id = Uuid::new_v4();
 
         // Populate the leaderboard sorted set cache key manually
         let key = "lb:all";
         let member = format!("post:{content_id}");
-        svc.cache
-            .replace_sorted_set(key, &[(member, 5.0)])
-            .await;
+        svc.cache.replace_sorted_set(key, &[(member, 5.0)]).await;
 
         // get_leaderboard without filter should use the cache
         let resp = svc
@@ -981,17 +988,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_liked_and_not_liked() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
         let other_content_id = Uuid::new_v4();
 
         svc.like(user_id, "post", content_id).await.unwrap();
 
-        let status = svc
-            .get_status(user_id, "post", content_id)
-            .await
-            .unwrap();
+        let status = svc.get_status(user_id, "post", content_id).await.unwrap();
         assert!(status.liked);
         assert!(status.liked_at.is_some());
 
@@ -1009,7 +1013,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_likes_with_content_type_filter() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
 
         let post_id = Uuid::new_v4();
@@ -1034,7 +1038,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_likes_bad_cursor_returns_error() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
 
         let err = svc
@@ -1054,7 +1058,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_statuses_too_large_returns_error() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
 
         let items: Vec<(String, Uuid)> = (0..101)
@@ -1063,7 +1067,13 @@ mod tests {
 
         let err = svc.batch_statuses(user_id, &items).await.unwrap_err();
         assert!(
-            matches!(err, AppError::BatchTooLarge { size: 101, max: 100 }),
+            matches!(
+                err,
+                AppError::BatchTooLarge {
+                    size: 101,
+                    max: 100
+                }
+            ),
             "expected BatchTooLarge, got: {err:?}"
         );
     }
@@ -1074,7 +1084,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_circuit_breaker_open_rejects_like() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -1106,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_content_validator_error_rolls_back_and_records_failure() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysErrorContent)).await;
+        let svc = make_service(Arc::new(AlwaysErrorContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -1127,9 +1137,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_leaderboard_different_time_windows() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
 
-        for window in [TimeWindow::Day, TimeWindow::Week, TimeWindow::Month, TimeWindow::All] {
+        for window in [
+            TimeWindow::Day,
+            TimeWindow::Week,
+            TimeWindow::Month,
+            TimeWindow::All,
+        ] {
             let resp = svc.get_leaderboard(None, window, 5).await.unwrap();
             assert_eq!(resp.window, window.as_str());
         }
@@ -1141,7 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_counts_all_cache_hits() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -1164,7 +1179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unlike_not_liked_get_count_inner_path() {
-        let (svc, _pg, _redis) = make_service(Arc::new(AlwaysValidContent)).await;
+        let svc = make_service(Arc::new(AlwaysValidContent)).await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -1172,30 +1187,5 @@ mod tests {
         let resp = svc.unlike(user_id, "post", content_id).await.unwrap();
         assert_eq!(resp.was_liked, Some(false));
         assert_eq!(resp.count, 0);
-    }
-}
-
-/// Parse a sorted-set member string `"content_type:content_id"` back into a
-/// `TopLikedItem`. Returns `None` (and logs a warning) when the format is
-/// unexpected so a single corrupt entry does not break the response.
-fn parse_leaderboard_member(member: &str, score: f64) -> Option<TopLikedItem> {
-    let colon_pos = member.find(':')?;
-    let ct = &member[..colon_pos];
-    let cid_str = &member[colon_pos + 1..];
-
-    match Uuid::parse_str(cid_str) {
-        Ok(cid) => Some(TopLikedItem {
-            content_type: ct.to_string(),
-            content_id: cid,
-            count: score as i64,
-        }),
-        Err(e) => {
-            tracing::warn!(
-                member = member,
-                error = %e,
-                "Invalid UUID in leaderboard cache member"
-            );
-            None
-        }
     }
 }

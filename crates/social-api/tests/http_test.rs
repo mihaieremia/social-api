@@ -302,7 +302,10 @@ async fn test_get_status_liked() {
     app.request(req).await;
 
     // Check status
-    let req = get_request(&format!("/v1/likes/post/{content_id}/status"), Some(user_id));
+    let req = get_request(
+        &format!("/v1/likes/post/{content_id}/status"),
+        Some(user_id),
+    );
     let resp = app.request(req).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -316,7 +319,10 @@ async fn test_get_status_not_liked() {
     let user_id = Uuid::new_v4();
     let content_id = Uuid::new_v4();
 
-    let req = get_request(&format!("/v1/likes/post/{content_id}/status"), Some(user_id));
+    let req = get_request(
+        &format!("/v1/likes/post/{content_id}/status"),
+        Some(user_id),
+    );
     let resp = app.request(req).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -500,11 +506,7 @@ async fn test_batch_statuses_returns_correct_status() {
 #[tokio::test]
 async fn test_batch_statuses_requires_auth() {
     let app = TestApp::new().await;
-    let req = json_request(
-        "POST",
-        "/v1/likes/batch/statuses",
-        json!({ "items": [] }),
-    );
+    let req = json_request("POST", "/v1/likes/batch/statuses", json!({ "items": [] }));
     let resp = app.request(req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

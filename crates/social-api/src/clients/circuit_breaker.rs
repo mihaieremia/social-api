@@ -444,7 +444,10 @@ mod tests {
         // Only one probe should be allowed through; the rest are blocked while
         // the probe is in-flight.
         let allowed_count = allowed.iter().filter(|&&a| a).count();
-        assert_eq!(allowed_count, 1, "exactly one concurrent probe should be allowed in HalfOpen");
+        assert_eq!(
+            allowed_count, 1,
+            "exactly one concurrent probe should be allowed in HalfOpen"
+        );
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 
@@ -470,7 +473,10 @@ mod tests {
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         // Second allow_request while probe is in-flight: must be rejected.
-        assert!(!cb.allow_request(), "second caller should be blocked while probe is in-flight");
+        assert!(
+            !cb.allow_request(),
+            "second caller should be blocked while probe is in-flight"
+        );
 
         // Probe succeeds -> probe_in_flight cleared.
         cb.record_success();
@@ -509,6 +515,9 @@ mod tests {
 
         // probe_in_flight must be cleared so the next recovery cycle works.
         let inner = cb.inner.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(!inner.probe_in_flight, "probe_in_flight should be cleared after failure");
+        assert!(
+            !inner.probe_in_flight,
+            "probe_in_flight should be cleared after failure"
+        );
     }
 }

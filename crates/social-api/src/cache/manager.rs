@@ -304,6 +304,7 @@ impl CacheManager {
     }
 
     /// Pipeline SET EX for multiple keys. Single round-trip instead of N sequential SETs.
+    #[allow(dead_code)]
     pub async fn mset_ex(&self, entries: &[(&str, &str, u64)]) {
         if entries.is_empty() {
             return;
@@ -428,22 +429,13 @@ impl CacheManager {
 mod tests {
     use super::*;
 
-    /// Spin up a testcontainers Redis and return a connected CacheManager.
-    /// The container must be kept alive for the duration of the test (returned as second element).
-    async fn make_cache() -> (
-        CacheManager,
-        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    ) {
-        use testcontainers::runners::AsyncRunner;
-        let redis = testcontainers_modules::redis::Redis::default()
-            .start()
-            .await
-            .expect("redis container");
-        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+    /// Return a CacheManager connected to the shared Redis container.
+    async fn make_cache() -> CacheManager {
+        let redis = crate::test_containers::shared_redis().await;
         let mut config = crate::config::Config::new_for_test();
-        config.redis_url = format!("redis://127.0.0.1:{port}");
+        config.redis_url = redis.url.clone();
         let pool = create_pool(&config).await.unwrap();
-        (CacheManager::new(pool), redis)
+        CacheManager::new(pool)
     }
 
     // -------------------------------------------------------------------------
@@ -452,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_set_del() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:get_set_del";
 
         // Nothing there yet
@@ -473,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         assert_eq!(cache.get("test:definitely_absent_key").await, None);
     }
 
@@ -483,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_incr_populates_missing_key() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:cond_incr_missing";
 
         // Key does not exist; script should SET it to db_count=5 and return 5
@@ -500,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_incr_existing_key() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:cond_incr_existing";
 
         // Pre-populate the key to 10
@@ -518,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_decr_existing_key() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:cond_decr_existing";
 
         cache.set(key, "5", 60).await;
@@ -534,7 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_decr_does_not_go_negative() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:cond_decr_floor";
 
         cache.set(key, "0", 60).await;
@@ -550,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_decr_populates_missing_key() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:cond_decr_missing";
 
         let result = cache.conditional_decr(key, 60, 7).await;
@@ -564,12 +556,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mget_mset_ex() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
 
-        let entries: Vec<(&str, &str, u64)> = vec![
-            ("test:mget_k1", "100", 60),
-            ("test:mget_k2", "200", 60),
-        ];
+        let entries: Vec<(&str, &str, u64)> =
+            vec![("test:mget_k1", "100", 60), ("test:mget_k2", "200", 60)];
         cache.mset_ex(&entries).await;
 
         let keys: Vec<String> = vec![
@@ -591,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mget_empty_input_returns_empty() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let results = cache.mget(&[]).await;
         assert!(results.is_empty());
     }
@@ -602,7 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_nx_only_sets_once() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:set_nx_lock";
 
         let first = cache.set_nx(key, "locked", 60).await;
@@ -621,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zrevrange_with_scores() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:zrev_scores";
 
         let members = vec![
@@ -649,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replace_sorted_set_overwrites() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         let key = "test:zrev_overwrite";
 
         // First population
@@ -674,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_healthy_returns_true() {
-        let (cache, _redis) = make_cache().await;
+        let cache = make_cache().await;
         assert!(cache.is_healthy().await);
     }
 
@@ -686,8 +676,7 @@ mod tests {
     async fn test_redis_unavailable_get_returns_none() {
         // Point at a port that has no Redis; use a very short connection timeout
         // so the test completes quickly.
-        let manager =
-            bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:19998").unwrap();
+        let manager = bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:19998").unwrap();
         let pool = bb8::Pool::builder()
             .max_size(2)
             .connection_timeout(std::time::Duration::from_millis(50))

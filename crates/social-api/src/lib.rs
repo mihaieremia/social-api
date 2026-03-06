@@ -15,3 +15,6 @@ pub mod services;
 pub mod shutdown;
 pub mod state;
 pub mod tasks;
+
+#[cfg(test)]
+pub mod test_containers;

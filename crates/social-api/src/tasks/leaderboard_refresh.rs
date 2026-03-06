@@ -127,40 +127,22 @@ async fn refresh_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::{postgres::Postgres, redis::Redis};
-
-    /// Spin up Postgres + Redis testcontainers, run migrations, return DbPools + CacheManager.
-    /// Both containers are returned so they stay alive for the duration of the test.
-    async fn setup() -> (
-        DbPools,
-        CacheManager,
-        testcontainers::ContainerAsync<Postgres>,
-        testcontainers::ContainerAsync<Redis>,
-    ) {
-        let pg = Postgres::default().start().await.expect("postgres container");
-        let redis = Redis::default().start().await.expect("redis container");
-
-        let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-        let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+    /// Return DbPools + CacheManager connected to the shared containers.
+    async fn setup() -> (DbPools, CacheManager) {
+        let pg = crate::test_containers::shared_pg().await;
+        let redis = crate::test_containers::shared_redis().await;
 
         let mut config = crate::config::Config::new_for_test();
-        config.database_url = db_url.clone();
-        config.read_database_url = db_url;
-        config.redis_url = format!("redis://127.0.0.1:{redis_port}");
+        config.database_url = pg.url.clone();
+        config.read_database_url = pg.url.clone();
+        config.redis_url = redis.url.clone();
 
         let db = DbPools::from_config(&config).await.unwrap();
-        sqlx::migrate!("../../migrations")
-            .run(&db.writer)
-            .await
-            .expect("run migrations");
 
         let redis_pool = crate::cache::manager::create_pool(&config).await.unwrap();
         let cache = CacheManager::new(redis_pool);
 
-        (db, cache, pg, redis)
+        (db, cache)
     }
 
     // -------------------------------------------------------------------------
@@ -169,11 +151,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_all_windows_empty_db() {
-        let (db, cache, _pg, _redis) = setup().await;
+        let (db, cache) = setup().await;
 
         // Should not panic or return an error
         let result = refresh_all_windows(&db, &cache).await;
-        assert!(result.is_ok(), "refresh_all_windows must not fail on empty DB");
+        assert!(
+            result.is_ok(),
+            "refresh_all_windows must not fail on empty DB"
+        );
 
         // All four window ZSETs must exist (even if empty after replace_sorted_set)
         for window in WINDOWS {
@@ -190,21 +175,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_window_populates_zset_with_data() {
-        let (db, cache, _pg, _redis) = setup().await;
+        let (db, cache) = setup().await;
 
         // Insert likes directly so the leaderboard query returns results
         let user_id = uuid::Uuid::new_v4();
         let content_id = uuid::Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO likes (user_id, content_type, content_id) VALUES ($1, $2, $3)",
-        )
-        .bind(user_id)
-        .bind("post")
-        .bind(content_id)
-        .execute(&db.writer)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO likes (user_id, content_type, content_id) VALUES ($1, $2, $3)")
+            .bind(user_id)
+            .bind("post")
+            .bind(content_id)
+            .execute(&db.writer)
+            .await
+            .unwrap();
 
         sqlx::query(
             r#"INSERT INTO like_counts (content_type, content_id, total_count)
@@ -242,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_window_day_uses_likes_table() {
-        let (db, cache, _pg, _redis) = setup().await;
+        let (db, cache) = setup().await;
 
         // Insert two likes for content_a and one like for content_b
         let content_a = uuid::Uuid::new_v4();
@@ -259,15 +242,13 @@ mod tests {
             .await
             .unwrap();
         }
-        sqlx::query(
-            "INSERT INTO likes (user_id, content_type, content_id) VALUES ($1, $2, $3)",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .bind("post")
-        .bind(content_b)
-        .execute(&db.writer)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO likes (user_id, content_type, content_id) VALUES ($1, $2, $3)")
+            .bind(uuid::Uuid::new_v4())
+            .bind("post")
+            .bind(content_b)
+            .execute(&db.writer)
+            .await
+            .unwrap();
 
         let result = refresh_window(&db, &cache, TimeWindow::Day).await;
         assert!(result.is_ok());
@@ -302,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_all_windows_covers_all_four_windows() {
-        let (db, cache, _pg, _redis) = setup().await;
+        let (db, cache) = setup().await;
 
         refresh_all_windows(&db, &cache).await.unwrap();
 
@@ -320,7 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_leaderboard_refresh_cancels_on_shutdown() {
-        let (db, cache, _pg, _redis) = setup().await;
+        let (db, cache) = setup().await;
 
         let shutdown_token = CancellationToken::new();
         let mut config = crate::config::Config::new_for_test();
