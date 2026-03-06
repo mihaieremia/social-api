@@ -1,0 +1,47 @@
+# Coverage report — runs on main pushes and PRs
+# Uses cargo-llvm-cov with testcontainers (unit + HTTP tests only).
+# Integration tests require docker compose and run separately in coverage-full.
+
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --workspace --all-targets \
+            --ignore-filename-regex 'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs' \
+            --lcov --output-path lcov.info \
+            -- --test-threads=4
+      - name: Upload to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+      - name: Coverage summary
+        run: |
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex 'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs'
