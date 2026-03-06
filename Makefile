@@ -6,7 +6,7 @@
         build check fmt lint \
         test test-unit test-unit-fast test-integration test-all \
         k6-load k6-load-read k6-load-batch k6-load-write k6-load-mixed k6-load-parallel k6-load-sse \
-        k6-stress k6-spike k6-soak k6-breakpoint \
+        k6-stress k6-spike k6-soak k6-breakpoint k6-tune-macos \
         up down build-docker logs \
         db-reset migrate sqlx-prepare \
         coverage coverage-full \
@@ -134,6 +134,19 @@ k6-load-sse: ## Load: SSE connection stress (ramp 0→200 connections)
 # ---------------------------------------------------------------------------
 # K6 — Stress strategies
 # ---------------------------------------------------------------------------
+
+k6-tune-macos: ## Tune macOS TCP/socket limits for high-RPS k6 tests (requires sudo)
+	@echo "Tuning macOS for high-RPS load testing..."
+	sudo sysctl -w net.inet.ip.portrange.first=1024
+	sudo sysctl -w net.inet.ip.portrange.hifirst=1024
+	sudo sysctl -w net.inet.tcp.msl=1000
+	sudo sysctl -w kern.maxfiles=65536
+	sudo sysctl -w kern.maxfilesperproc=65536
+	ulimit -n 65536
+	@echo ""
+	@echo "  Done. Ephemeral port range expanded, TIME_WAIT reduced."
+	@echo "  Run 'make k6-stress' now."
+	@echo ""
 
 k6-stress: ## Stress: ramp to TARGET_RPS (default 100k), sustain STRESS_DURATION (default 30m)
 	k6 run \

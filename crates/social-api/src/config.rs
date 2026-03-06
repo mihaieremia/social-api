@@ -43,6 +43,12 @@ pub struct Config {
     /// Default: 30s (spec recommendation).
     pub circuit_breaker_rate_window_secs: u64,
 
+    // Server concurrency
+    /// Maximum number of concurrent in-flight requests the server will accept.
+    /// Requests beyond this limit receive 503 Service Unavailable immediately,
+    /// providing backpressure instead of queuing until timeout.
+    pub server_concurrency_limit: usize,
+
     // Shutdown
     pub shutdown_timeout_secs: u64,
 
@@ -124,6 +130,7 @@ impl Config {
                 "CIRCUIT_BREAKER_RATE_WINDOW_SECS",
                 30,
             ),
+            server_concurrency_limit: env_or_default("SERVER_CONCURRENCY_LIMIT", 10000),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
             sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 128),
@@ -179,6 +186,7 @@ impl Config {
             circuit_breaker_success_threshold: 2,
             circuit_breaker_rate_window_secs: 30,
             leaderboard_refresh_interval_secs: 300,
+            server_concurrency_limit: 10000,
             shutdown_timeout_secs: 30,
             sse_heartbeat_interval_secs: 15,
             sse_broadcast_capacity: 128,
@@ -458,6 +466,7 @@ mod tests {
         assert_eq!(config.circuit_breaker_failure_threshold, 3);
         assert_eq!(config.circuit_breaker_recovery_timeout_secs, 15);
         assert_eq!(config.circuit_breaker_success_threshold, 2);
+        assert_eq!(config.server_concurrency_limit, 10000);
         assert_eq!(config.shutdown_timeout_secs, 20);
         assert_eq!(config.sse_heartbeat_interval_secs, 10);
         assert_eq!(config.sse_broadcast_capacity, 128);

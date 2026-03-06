@@ -3,6 +3,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -33,6 +34,7 @@ impl<B> tower_http::trace::MakeSpan<B> for MakeRequestSpan {
 
 /// Build the Axum router with all routes and middleware.
 pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router {
+    let concurrency_limit = state.config().server_concurrency_limit;
     let health_routes = Router::new()
         .route("/health/live", get(handlers::health::liveness))
         .route("/health/ready", get(handlers::health::readiness))
@@ -83,8 +85,9 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
 
     // Merge write + read routes with shared state and global middleware
     // Layer order (last added = outermost = runs first):
-    //   TraceLayer → inflight → request_id → error_context → metrics → rate_limit → handler
+    //   TraceLayer → ConcurrencyLimit → inflight → request_id → error_context → metrics → rate_limit → handler
     //
+    // ConcurrencyLimitLayer sheds excess load with 503 before allocating resources.
     // TraceLayer is outermost so its span is active for all subsequent middleware.
     // inject_request_id records request_id into the span; AuthUser extractor records user_id.
     let api_routes = Router::new()
@@ -102,6 +105,7 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
             state,
             middleware::inflight::track_inflight,
         ))
+        .layer(ConcurrencyLimitLayer::new(concurrency_limit))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(MakeRequestSpan)
