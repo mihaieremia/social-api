@@ -61,35 +61,16 @@ impl ContentValidator for HttpContentValidator {
 
         let response = match response {
             Ok(r) => {
-                metrics::counter!(
-                    "social_api_external_calls_total",
-                    "service" => "content_api",
-                    "method" => "validate",
-                    "status" => r.status().as_u16().to_string(),
-                )
-                .increment(1);
-                metrics::histogram!(
-                    "social_api_external_call_duration_seconds",
-                    "service" => "content_api",
-                    "method" => "validate",
-                )
-                .record(latency);
+                super::metrics::record_external_call(
+                    "content_api",
+                    "validate",
+                    &r.status().as_u16().to_string(),
+                    latency,
+                );
                 r
             }
             Err(e) => {
-                metrics::counter!(
-                    "social_api_external_calls_total",
-                    "service" => "content_api",
-                    "method" => "validate",
-                    "status" => "error",
-                )
-                .increment(1);
-                metrics::histogram!(
-                    "social_api_external_call_duration_seconds",
-                    "service" => "content_api",
-                    "method" => "validate",
-                )
-                .record(latency);
+                super::metrics::record_external_call("content_api", "validate", "error", latency);
                 tracing::error!(
                     service = "content_api",
                     content_type = content_type,
