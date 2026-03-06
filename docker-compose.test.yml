@@ -1,0 +1,17 @@
+# Test overrides — used by `make coverage-full` and CI.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#
+# Keeps docker-compose.yml production-like while tuning values for fast,
+# automated test execution.
+
+services:
+  social-api:
+    environment:
+      # Fast circuit breaker recovery so integration tests don't wait 30s
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: "3"
+      CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS: "5"
+      CIRCUIT_BREAKER_SUCCESS_THRESHOLD: "2"
+      # Shorter shutdown timeout for graceful shutdown tests
+      SHUTDOWN_TIMEOUT_SECS: "10"
+      # Faster SSE heartbeat so tests detect stream activity sooner
+      SSE_HEARTBEAT_INTERVAL_SECS: "3"

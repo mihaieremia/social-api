@@ -518,9 +518,9 @@ async fn test_circuit_breaker_metric_registered() {
 async fn test_concurrent_likes_race_condition() {
     use futures::future::join_all;
 
-    // Dedicated top_picks ID not used by any other test
+    // Use a fixed mock-services content ID (must exist in mock data).
     const CONTENT_TYPE: &str = "top_picks";
-    const CONCURRENT_CONTENT_ID: &str = "c0000003-0001-4000-8000-000000000001";
+    let concurrent_content_id = "f2a3b4c5-d6e7-8901-5678-012345678901".to_string();
 
     let tokens = [
         TOKEN_USER_1,
@@ -534,7 +534,7 @@ async fn test_concurrent_likes_race_condition() {
     for token in &tokens {
         let _ = client()
             .delete(format!(
-                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}"
+                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}"
             ))
             .header("Authorization", auth_header(token))
             .send()
@@ -544,17 +544,20 @@ async fn test_concurrent_likes_race_condition() {
     // Fire 5 concurrent like requests, one per user
     let futures: Vec<_> = tokens
         .iter()
-        .map(|&token| async move {
-            client()
-                .post(format!("{BASE_URL}/v1/likes"))
-                .header("Authorization", format!("Bearer {token}"))
-                .json(&json!({
-                    "content_type": CONTENT_TYPE,
-                    "content_id": CONCURRENT_CONTENT_ID
-                }))
-                .send()
-                .await
-                .unwrap()
+        .map(|&token| {
+            let cid = concurrent_content_id.clone();
+            async move {
+                client()
+                    .post(format!("{BASE_URL}/v1/likes"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .json(&json!({
+                        "content_type": CONTENT_TYPE,
+                        "content_id": cid
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+            }
         })
         .collect();
 
@@ -573,7 +576,7 @@ async fn test_concurrent_likes_race_condition() {
     // Final count must be exactly 5 — no phantom duplicates
     let count_resp = client()
         .get(format!(
-            "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}/count"
+            "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}/count"
         ))
         .send()
         .await
@@ -590,7 +593,7 @@ async fn test_concurrent_likes_race_condition() {
     for token in &tokens {
         let _ = client()
             .delete(format!(
-                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{CONCURRENT_CONTENT_ID}"
+                "{BASE_URL}/v1/likes/{CONTENT_TYPE}/{concurrent_content_id}"
             ))
             .header("Authorization", auth_header(token))
             .send()
@@ -754,38 +757,116 @@ async fn test_rate_limit_write_endpoint() {
 }
 
 /// Verifies that when the Profile API is unreachable, the circuit breaker
-/// trips and subsequent auth-dependent requests fail fast with 503.
+/// trips and subsequent auth-dependent requests fail fast with 503,
+/// then recovers after mock-services comes back.
 ///
-/// This test requires stopping the mock-services container:
-///   docker compose stop mock-services
+/// Full lifecycle: Closed -> Open -> HalfOpen -> Closed
 ///
-/// After the test, restart with:
-///   docker compose start mock-services
+/// Uses `docker compose stop/start mock-services` programmatically.
+/// Requires `docker-compose.test.yml` overrides for fast recovery (5s).
 ///
-/// The test is ignored by default and tagged for manual fault-injection runs.
+/// **Must run last** — it stops mock-services, which would break other tests.
+/// The Makefile runs this in a separate `cargo test` invocation.
 #[tokio::test]
 #[ignore]
 async fn test_circuit_breaker_trips_on_profile_api_failure() {
     let c = client();
 
-    // Pre-check: if mock-services is running, this test is a no-op.
-    // We detect this by making a health check to the mock.
+    // ── Phase 0: Verify mock-services is healthy ──
     let mock_health = c
         .get(format!("{MOCK_URL}/health"))
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
         .send()
         .await;
+    assert!(
+        mock_health.is_ok(),
+        "Pre-condition: mock-services must be running"
+    );
 
-    if mock_health.is_ok() {
-        eprintln!(
-            "SKIP: mock-services is running. Stop it first: docker compose stop mock-services"
-        );
-        return;
+    // Flush Redis to clear cached auth tokens from previous tests.
+    // Without this, the auth extractor serves tokens from cache and
+    // never hits the (stopped) profile API, so the breaker never trips.
+    eprintln!("[CB] Flushing Redis to clear cached auth tokens...");
+    let output = tokio::process::Command::new("docker")
+        .args(["compose", "exec", "redis", "redis-cli", "FLUSHALL"])
+        .output()
+        .await
+        .expect("Failed to flush Redis");
+    assert!(
+        output.status.success(),
+        "redis FLUSHALL failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Run the test body inside tokio::spawn so we can catch panics
+    // and always restart mock-services in the cleanup path.
+    let test_result = tokio::spawn(circuit_breaker_test_body()).await;
+
+    // ── Cleanup: Always restart mock-services ──
+    eprintln!("[CB] Cleanup: restarting mock-services...");
+    let _ = tokio::process::Command::new("docker")
+        .args(["compose", "start", "mock-services"])
+        .output()
+        .await;
+
+    // Wait for mock-services to become healthy before returning
+    for attempt in 1..=30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Ok(resp) = client()
+            .get(format!("{MOCK_URL}/health"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if resp.status() == 200 {
+                eprintln!("[CB] Cleanup: mock-services healthy after {attempt}s");
+                break;
+            }
+        }
     }
 
-    // Mock is down. Send enough auth requests to trip the breaker.
-    // Default threshold is 5 consecutive failures.
-    for i in 0..6 {
+    // Re-raise any panic from the test body
+    match test_result {
+        Ok(()) => {}
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => panic!("Circuit breaker test task failed: {e}"),
+    }
+}
+
+/// Inner test body for circuit breaker — separated so the outer function
+/// can catch panics and always run cleanup.
+async fn circuit_breaker_test_body() {
+    let c = client();
+
+    // ── Phase 1: Stop mock-services to simulate dependency failure ──
+    eprintln!("[CB] Stopping mock-services...");
+    let output = tokio::process::Command::new("docker")
+        .args(["compose", "stop", "mock-services"])
+        .output()
+        .await
+        .expect("Failed to stop mock-services");
+    assert!(
+        output.status.success(),
+        "docker compose stop mock-services failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Wait until mock-services is actually unreachable
+    for _ in 0..20 {
+        if c.get(format!("{MOCK_URL}/health"))
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    eprintln!("[CB] mock-services stopped");
+
+    // ── Phase 2: Trip the circuit breaker (threshold=3 with test overrides) ──
+    for i in 0..4 {
         let resp = c
             .post(format!("{BASE_URL}/v1/likes"))
             .header("Authorization", auth_header(TOKEN_USER_1))
@@ -800,7 +881,6 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
         let status = resp.status().as_u16();
         let body: Value = resp.json().await.unwrap();
 
-        // All should be 503 (dependency unavailable)
         assert_eq!(
             status, 503,
             "Request {i}: expected 503, got {status}: {body}"
@@ -810,12 +890,12 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
             "Request {i}: expected DEPENDENCY_UNAVAILABLE"
         );
     }
+    eprintln!("[CB] Breaker tripped after consecutive failures");
 
-    // Verify the breaker is now open by checking metrics
+    // ── Phase 3: Verify breaker is Open via metrics ──
     let resp = c.get(format!("{BASE_URL}/metrics")).send().await.unwrap();
     let metrics_body = resp.text().await.unwrap();
 
-    // Circuit breaker gauge should show 2.0 (Open state)
     if metrics_body.contains("social_api_circuit_breaker_state") {
         assert!(
             metrics_body.contains("social_api_circuit_breaker_state{")
@@ -824,7 +904,7 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
         );
     }
 
-    // The 7th request should also fail fast (breaker is open, no external call)
+    // Extra request should fail fast (breaker open, no external call)
     let resp = c
         .post(format!("{BASE_URL}/v1/likes"))
         .header("Authorization", auth_header(TOKEN_USER_1))
@@ -835,5 +915,68 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.status(), 503, "Breaker should be open, fail fast");
+
+    // ── Phase 4: Restart mock-services ──
+    eprintln!("[CB] Restarting mock-services...");
+    let output = tokio::process::Command::new("docker")
+        .args(["compose", "start", "mock-services"])
+        .output()
+        .await
+        .expect("Failed to start mock-services");
+    assert!(
+        output.status.success(),
+        "docker compose start mock-services failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for attempt in 1..=30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Ok(resp) = c
+            .get(format!("{MOCK_URL}/health"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if resp.status() == 200 {
+                eprintln!("[CB] mock-services healthy after {attempt}s");
+                break;
+            }
+        }
+        if attempt == 30 {
+            panic!("mock-services did not become healthy within 30s");
+        }
+    }
+
+    // ── Phase 5: Wait for recovery timeout (5s with test overrides) ──
+    eprintln!("[CB] Waiting for circuit breaker recovery timeout...");
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    // ── Phase 6: Verify recovery (HalfOpen -> Closed) ──
+    for attempt in 1..=5 {
+        let resp = c
+            .post(format!("{BASE_URL}/v1/likes"))
+            .header("Authorization", auth_header(TOKEN_USER_1))
+            .json(&json!({
+                "content_type": "post",
+                "content_id": VALID_POST_ID
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let status = resp.status().as_u16();
+        eprintln!("[CB] Recovery probe {attempt}: status={status}");
+
+        // 201 (new like) or 409 (already liked) both prove auth worked
+        if status == 201 || status == 409 {
+            eprintln!("[CB] Circuit breaker recovered!");
+            return;
+        }
+
+        if attempt == 5 {
+            panic!("Circuit breaker did not recover after mock-services restart");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }

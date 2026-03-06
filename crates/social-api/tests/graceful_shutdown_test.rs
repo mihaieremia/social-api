@@ -62,9 +62,14 @@ async fn restart_social_api() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Force recreate to get a clean container
+    // Force recreate to get a clean container (use test overrides if present)
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "up", "-d", "--force-recreate", "social-api"])
+        .args([
+            "compose",
+            "-f", "docker-compose.yml",
+            "-f", "docker-compose.test.yml",
+            "up", "-d", "--force-recreate", "social-api",
+        ])
         .output()
         .await
         .expect("Failed to restart social-api");
