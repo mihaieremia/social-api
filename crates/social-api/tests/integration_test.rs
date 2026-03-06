@@ -817,11 +817,10 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
+            && resp.status() == 200
         {
-            if resp.status() == 200 {
-                eprintln!("[CB] Cleanup: mock-services healthy after {attempt}s");
-                break;
-            }
+            eprintln!("[CB] Cleanup: mock-services healthy after {attempt}s");
+            break;
         }
     }
 
@@ -937,11 +936,10 @@ async fn circuit_breaker_test_body() {
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
+            && resp.status() == 200
         {
-            if resp.status() == 200 {
-                eprintln!("[CB] mock-services healthy after {attempt}s");
-                break;
-            }
+            eprintln!("[CB] mock-services healthy after {attempt}s");
+            break;
         }
         if attempt == 30 {
             panic!("mock-services did not become healthy within 30s");

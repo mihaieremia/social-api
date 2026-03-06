@@ -283,7 +283,11 @@ impl CacheManager {
             }
         };
 
-        match conn.get::<_, Vec<Option<String>>>(keys).await {
+        match redis::cmd("MGET")
+            .arg(keys)
+            .query_async::<Vec<Option<String>>>(&mut *conn)
+            .await
+        {
             Ok(vals) => {
                 let hits = vals.iter().filter(|v| v.is_some()).count();
                 let misses = vals.len() - hits;

@@ -10,7 +10,8 @@
         up down build-docker logs \
         db-reset migrate sqlx-prepare \
         coverage coverage-full \
-        health metrics
+        health metrics \
+        setup-hooks
 
 # ---------------------------------------------------------------------------
 # Variables (override on CLI: make k6-stress TARGET_RPS=50000)
@@ -53,6 +54,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "  OBSERVABILITY"
 	@awk 'BEGIN{FS=":.*##"} /^(health|metrics).*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ""
+	@echo "  SETUP"
+	@awk 'BEGIN{FS=":.*##"} /^setup.*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "  Overridable vars: BASE_URL=$(BASE_URL)  TARGET_RPS=$(TARGET_RPS)  STRESS_DURATION=$(STRESS_DURATION)"
 	@echo ""
@@ -308,3 +312,12 @@ health: ## Check /health/ready endpoint
 
 metrics: ## Dump raw Prometheus metrics
 	curl -s $(BASE_URL)/metrics
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+setup-hooks: ## Install git pre-commit hook (fmt + clippy gate)
+	cp scripts/pre-commit .git/hooks/pre-commit
+	chmod +x .git/hooks/pre-commit
+	@echo "Pre-commit hook installed. Commits will be gated by cargo fmt + clippy."
