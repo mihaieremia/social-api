@@ -75,7 +75,7 @@ impl<B> tower_http::trace::MakeSpan<B> for MakeRequestSpan {
 /// Custom `OnResponse` that conditionally logs based on access log level.
 ///
 /// - `Full`: log every response at INFO with latency.
-/// - `Errors`: log only 4xx/5xx status codes or slow requests (>500ms) at WARN.
+/// - `Errors`: log only 4xx/5xx status codes or slow requests (>2s) at WARN.
 /// - `None`: no per-request logging at all (metrics handle observability).
 #[derive(Clone)]
 struct ConditionalOnResponse {
@@ -97,7 +97,7 @@ impl<B> tower_http::trace::OnResponse<B> for ConditionalOnResponse {
                 tracing::info!(status, latency_ms, "response");
             }
             AccessLogLevel::Errors => {
-                if status >= 400 || latency_ms > 500.0 {
+                if status >= 400 || latency_ms > 2000.0 {
                     tracing::warn!(status, latency_ms, "slow or error response");
                 }
             }
