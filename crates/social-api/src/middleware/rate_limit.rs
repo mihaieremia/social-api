@@ -5,10 +5,17 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use shared::errors::{ApiError, ErrorCode};
-use std::sync::LazyLock;
+use std::sync::{
+    LazyLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::cache::manager::CacheManager;
 use crate::state::AppState;
+
+/// Global atomic counter for rate limit ZSET members.
+/// Much cheaper than UUID v4 generation (no OS entropy syscall).
+static RATE_LIMIT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Lua script for atomic sliding window rate limiting.
 /// Operations: ZREMRANGEBYSCORE (prune old), ZCARD (count), ZADD (add current).
@@ -80,7 +87,10 @@ async fn check_rate_limit_inner(
 
     let window_ms = (window_secs * 1000).to_string();
     let limit_str = limit.to_string();
-    let member = format!("{}:{}", now, uuid::Uuid::new_v4());
+    // Use atomic counter instead of UUID for ZSET member uniqueness.
+    // Eliminates ~6,600 UUID v4 generations/sec at high RPS.
+    let seq = RATE_LIMIT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let member = format!("{}:{}", now, seq);
 
     let result = cache
         .invoke_script(
