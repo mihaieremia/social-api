@@ -54,9 +54,11 @@ services:
       dockerfile: Dockerfile.mock
     environment:
       MOCK_PORT: "8081"
+      MOCK_GRPC_PORT: "50052"
       RUST_LOG: info
     ports:
       - "8081:8081"
+      - "50052:50052"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 5s
@@ -79,6 +81,9 @@ services:
       CONTENT_API_BONUS_HUNTER_URL: http://mock-services:8081
       CONTENT_API_TOP_PICKS_URL: http://mock-services:8081
       PROFILE_API_URL: http://mock-services:8081
+      GRPC_PORT: "50051"
+      # INTERNAL_TRANSPORT: "grpc"  # Uncomment to use gRPC inter-service calls
+      # INTERNAL_GRPC_URL: "http://mock-services:50052"
       DB_MAX_CONNECTIONS: "100"
       DB_MIN_CONNECTIONS: "20"
       DB_ACQUIRE_TIMEOUT_SECS: "10"
@@ -92,6 +97,7 @@ services:
       ACCESS_LOG: errors
     ports:
       - "8080:8080"
+      - "50051:50051"
     depends_on:
       postgres:
         condition: service_healthy
