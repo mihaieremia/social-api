@@ -1,10 +1,10 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 5s
+  evaluation_interval: 5s
 
 scrape_configs:
   - job_name: "social-api"
-    scrape_interval: 15s
+    scrape_interval: 1s
     metrics_path: /metrics
     static_configs:
       - targets: ["social-api:8080"]
@@ -12,21 +12,21 @@ scrape_configs:
           service: "social-api"
 
   - job_name: "postgres-exporter"
-    scrape_interval: 30s
+    scrape_interval: 25s
     static_configs:
       - targets: ["postgres-exporter:9187"]
         labels:
           service: "postgres"
 
   - job_name: "redis-exporter"
-    scrape_interval: 15s
+    scrape_interval: 10s
     static_configs:
       - targets: ["redis-exporter:9121"]
         labels:
           service: "redis"
 
   - job_name: "prometheus"
-    scrape_interval: 30s
+    scrape_interval: 15s
     static_configs:
       - targets: ["localhost:9090"]
         labels:
