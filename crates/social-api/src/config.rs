@@ -263,6 +263,7 @@ fn build_content_api_urls() -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_env_or_default_with_missing_var() {
@@ -272,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_or_default_with_invalid_value() {
         // SAFETY: Single-threaded test, no concurrent env access
         unsafe { env::set_var("__TEST_INVALID_VAR__", "not_a_number") };
@@ -311,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_or_default_with_valid_value() {
         unsafe { std::env::set_var("__TEST_VALID_U32_COVERAGE__", "99") };
         let result: u32 = env_or_default("__TEST_VALID_U32_COVERAGE__", 0);
@@ -344,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_require_env_with_empty_string_value() {
         unsafe { env::set_var("__EMPTY_VAR_COVERAGE_TEST__", "") };
         let mut missing: Vec<&str> = Vec::new();
@@ -354,6 +358,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_require_env_with_present_value() {
         unsafe { env::set_var("__PRESENT_VAR_COVERAGE_TEST__", "hello") };
         let mut missing: Vec<&str> = Vec::new();
@@ -364,6 +369,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_build_content_api_urls_known_types() {
         unsafe {
             env::set_var("CONTENT_API_POST_URL", "http://post-api");
@@ -388,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_build_content_api_urls_unknown_extra_type() {
         unsafe {
             env::set_var("CONTENT_API_NEWS_ARTICLE_URL", "http://news-api");
@@ -407,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_build_content_api_urls_empty_value_not_inserted() {
         unsafe {
             env::set_var("CONTENT_API_POST_URL", "");
@@ -420,6 +428,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_from_env_success() {
         unsafe {
             env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
@@ -501,6 +510,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[should_panic(expected = "Missing required environment variables")]
     fn test_from_env_panics_on_missing_required_vars() {
         // Ensure required vars are not set
@@ -515,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[should_panic(expected = "HTTP_PORT must be a valid port number")]
     fn test_from_env_panics_on_invalid_http_port() {
         unsafe {
@@ -537,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[should_panic(expected = "No content API URLs configured")]
     fn test_from_env_panics_when_no_content_api_urls() {
         unsafe {

@@ -68,6 +68,7 @@ utoipa-swagger-ui = { workspace = true }
 [dev-dependencies]
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
+serial_test = { workspace = true }
 # sqlx re-declared to satisfy Cargo; no extra features needed beyond what [dependencies] already enables
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
 http-body-util = "0.1"
