@@ -101,8 +101,8 @@ CREATE TABLE likes (
 CREATE INDEX idx_likes_user_created ON likes (user_id, created_at DESC, id DESC);
 -- Count aggregation fallback
 CREATE INDEX idx_likes_content ON likes (content_type, content_id);
--- Time-windowed leaderboard (BRIN: ideal for append-only timestamps)
-CREATE INDEX idx_likes_created_at ON likes USING brin (created_at) WITH (pages_per_range = 32);
+-- Time-windowed leaderboard (B-tree composite for range scan + GROUP BY)
+CREATE INDEX idx_likes_created_ct_cid ON likes (created_at, content_type, content_id);
 ```
 
 ### like_counts table (materialized counter)
