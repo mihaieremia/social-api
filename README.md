@@ -112,7 +112,7 @@ CREATE TABLE like_counts (
 |-------|--------|------------|
 | `idx_likes_user_created (user_id, created_at DESC, id DESC)` | Cursor pagination for user's likes | Low — append-only pattern |
 | `idx_likes_content (content_type, content_id)` | Count fallback queries | Low |
-| `idx_likes_created_at (created_at) USING brin (pages_per_range=32)` | Time-windowed leaderboard | Very low — BRIN is ideal for append-only timestamp columns |
+| `idx_likes_created_ct_cid (created_at, content_type, content_id)` | Time-windowed leaderboard | Moderate — B-tree composite enables index range scan + GROUP BY |
 
 ## Redis Key Design
 

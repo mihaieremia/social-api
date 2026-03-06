@@ -18,7 +18,9 @@ CREATE INDEX IF NOT EXISTS idx_likes_user_created
 CREATE INDEX IF NOT EXISTS idx_likes_content
     ON likes (content_type, content_id);
 
--- Time-windowed leaderboard aggregation (BRIN: ideal for append-only timestamps)
+-- Time-windowed leaderboard aggregation
 -- Covers: WHERE created_at >= $cutoff GROUP BY content_type, content_id
+-- NOTE: Migration 003 replaces this BRIN index with a B-tree composite
+-- (created_at, content_type, content_id) for better range scan + GROUP BY.
 CREATE INDEX IF NOT EXISTS idx_likes_created_at
     ON likes USING brin (created_at) WITH (pages_per_range = 32);
