@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, QueryBuilder};
 use uuid::Uuid;
 
 /// Like record from the database.
@@ -263,76 +263,28 @@ pub async fn get_user_likes(
 ) -> Result<Vec<LikeRow>, sqlx::Error> {
     let fetch_limit = limit + 1;
 
-    match (cursor_ts, cursor_id, content_type_filter) {
-        (Some(ts), Some(id), Some(ct)) => {
-            sqlx::query_as::<_, LikeRow>(
-                r#"
-                SELECT id, content_type, content_id, created_at
-                FROM likes
-                WHERE user_id = $1 AND content_type = $2
-                  AND (created_at, id) < ($3, $4)
-                ORDER BY created_at DESC, id DESC
-                LIMIT $5
-                "#,
-            )
-            .bind(user_id)
-            .bind(ct)
-            .bind(ts)
-            .bind(id)
-            .bind(fetch_limit)
-            .fetch_all(pool)
-            .await
-        }
-        (Some(ts), Some(id), None) => {
-            sqlx::query_as::<_, LikeRow>(
-                r#"
-                SELECT id, content_type, content_id, created_at
-                FROM likes
-                WHERE user_id = $1
-                  AND (created_at, id) < ($2, $3)
-                ORDER BY created_at DESC, id DESC
-                LIMIT $4
-                "#,
-            )
-            .bind(user_id)
-            .bind(ts)
-            .bind(id)
-            .bind(fetch_limit)
-            .fetch_all(pool)
-            .await
-        }
-        (_, _, Some(ct)) => {
-            sqlx::query_as::<_, LikeRow>(
-                r#"
-                SELECT id, content_type, content_id, created_at
-                FROM likes
-                WHERE user_id = $1 AND content_type = $2
-                ORDER BY created_at DESC, id DESC
-                LIMIT $3
-                "#,
-            )
-            .bind(user_id)
-            .bind(ct)
-            .bind(fetch_limit)
-            .fetch_all(pool)
-            .await
-        }
-        _ => {
-            sqlx::query_as::<_, LikeRow>(
-                r#"
-                SELECT id, content_type, content_id, created_at
-                FROM likes
-                WHERE user_id = $1
-                ORDER BY created_at DESC, id DESC
-                LIMIT $2
-                "#,
-            )
-            .bind(user_id)
-            .bind(fetch_limit)
-            .fetch_all(pool)
-            .await
-        }
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, content_type, content_id, created_at FROM likes WHERE user_id = ",
+    );
+    qb.push_bind(user_id);
+
+    if let Some(ct) = content_type_filter {
+        qb.push(" AND content_type = ");
+        qb.push_bind(ct.to_string());
     }
+
+    if let (Some(ts), Some(id)) = (cursor_ts, cursor_id) {
+        qb.push(" AND (created_at, id) < (");
+        qb.push_bind(ts);
+        qb.push(", ");
+        qb.push_bind(id);
+        qb.push(")");
+    }
+
+    qb.push(" ORDER BY created_at DESC, id DESC LIMIT ");
+    qb.push_bind(fetch_limit);
+
+    qb.build_query_as::<LikeRow>().fetch_all(pool).await
 }
 
 /// Batch get like statuses for a user.
@@ -375,69 +327,37 @@ pub async fn get_leaderboard(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<(String, Uuid, i64)>, sqlx::Error> {
-    match (content_type, since) {
-        (Some(ct), Some(since_ts)) => {
-            sqlx::query_as(
-                r#"
-                SELECT content_type, content_id, COUNT(*) as count
-                FROM likes
-                WHERE content_type = $1 AND created_at >= $2
-                GROUP BY content_type, content_id
-                ORDER BY count DESC
-                LIMIT $3
-                "#,
-            )
-            .bind(ct)
-            .bind(since_ts)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
+    let mut qb: QueryBuilder<sqlx::Postgres> = match since {
+        Some(since_ts) => {
+            // Time-windowed: aggregate from likes table
+            let mut qb = QueryBuilder::new(
+                "SELECT content_type, content_id, COUNT(*) as count FROM likes WHERE created_at >= ",
+            );
+            qb.push_bind(since_ts);
+            if let Some(ct) = content_type {
+                qb.push(" AND content_type = ");
+                qb.push_bind(ct.to_string());
+            }
+            qb.push(" GROUP BY content_type, content_id ORDER BY count DESC LIMIT ");
+            qb.push_bind(limit);
+            qb
         }
-        (Some(ct), None) => {
-            sqlx::query_as(
-                r#"
-                SELECT content_type, content_id, total_count as count
-                FROM like_counts
-                WHERE content_type = $1
-                ORDER BY total_count DESC
-                LIMIT $2
-                "#,
-            )
-            .bind(ct)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
+        None => {
+            // All-time: use pre-materialized like_counts table
+            let mut qb = QueryBuilder::new(
+                "SELECT content_type, content_id, total_count as count FROM like_counts",
+            );
+            if let Some(ct) = content_type {
+                qb.push(" WHERE content_type = ");
+                qb.push_bind(ct.to_string());
+            }
+            qb.push(" ORDER BY total_count DESC LIMIT ");
+            qb.push_bind(limit);
+            qb
         }
-        (None, Some(since_ts)) => {
-            sqlx::query_as(
-                r#"
-                SELECT content_type, content_id, COUNT(*) as count
-                FROM likes
-                WHERE created_at >= $1
-                GROUP BY content_type, content_id
-                ORDER BY count DESC
-                LIMIT $2
-                "#,
-            )
-            .bind(since_ts)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
-        (None, None) => {
-            sqlx::query_as(
-                r#"
-                SELECT content_type, content_id, total_count as count
-                FROM like_counts
-                ORDER BY total_count DESC
-                LIMIT $1
-                "#,
-            )
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
-    }
+    };
+
+    qb.build_query_as().fetch_all(pool).await
 }
 
 #[cfg(test)]
