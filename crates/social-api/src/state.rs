@@ -45,15 +45,7 @@ impl AppState {
             .build()
             .expect("Failed to build HTTP client");
 
-        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-            failure_threshold: config.circuit_breaker_failure_threshold,
-            recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
-            success_threshold: config.circuit_breaker_success_threshold,
-            service_name: "profile_api".to_string(),
-            rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
-            failure_rate_threshold: 0.5,
-            min_calls_for_rate: 10,
-        }));
+        let profile_breaker = build_profile_breaker(&config);
 
         let content_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: config.circuit_breaker_failure_threshold,
@@ -162,17 +154,7 @@ impl AppState {
         token_validator: Box<dyn TokenValidator>,
         like_service: LikeService,
     ) -> Self {
-        let profile_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-            failure_threshold: config.circuit_breaker_failure_threshold,
-            recovery_timeout: std::time::Duration::from_secs(
-                config.circuit_breaker_recovery_timeout_secs,
-            ),
-            success_threshold: config.circuit_breaker_success_threshold,
-            service_name: "profile_api".to_string(),
-            rate_window: std::time::Duration::from_secs(config.circuit_breaker_rate_window_secs),
-            failure_rate_threshold: 0.5,
-            min_calls_for_rate: 10,
-        }));
+        let profile_breaker = build_profile_breaker(&config);
         let http_client = reqwest::Client::new();
         let pubsub_manager =
             PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
@@ -191,6 +173,18 @@ impl AppState {
             }),
         }
     }
+}
+
+fn build_profile_breaker(config: &Config) -> Arc<CircuitBreaker> {
+    Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+        failure_threshold: config.circuit_breaker_failure_threshold,
+        recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
+        success_threshold: config.circuit_breaker_success_threshold,
+        service_name: "profile_api".to_string(),
+        rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
+        failure_rate_threshold: 0.5,
+        min_calls_for_rate: 10,
+    }))
 }
 
 #[cfg(test)]

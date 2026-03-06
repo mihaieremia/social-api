@@ -9,6 +9,18 @@ use shared::types::{HealthDetail, HealthResponse};
 
 use crate::state::AppState;
 
+/// Build a HealthDetail for a single dependency check.
+fn make_health_detail(healthy: bool, down_message: &str) -> HealthDetail {
+    HealthDetail {
+        status: if healthy { "up" } else { "down" }.to_string(),
+        error: if healthy {
+            None
+        } else {
+            Some(down_message.to_string())
+        },
+    }
+}
+
 /// GET /health/live
 /// Returns 200 if process is running. No dependency checks.
 /// Used by Kubernetes liveness probe.
@@ -58,38 +70,15 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
 
     details.insert(
         "database".to_string(),
-        HealthDetail {
-            status: if db_healthy { "up" } else { "down" }.to_string(),
-            error: if db_healthy {
-                None
-            } else {
-                Some("Database unreachable".to_string())
-            },
-        },
+        make_health_detail(db_healthy, "Database unreachable"),
     );
-
     details.insert(
         "redis".to_string(),
-        HealthDetail {
-            status: if redis_healthy { "up" } else { "down" }.to_string(),
-            error: if redis_healthy {
-                None
-            } else {
-                Some("Redis unreachable".to_string())
-            },
-        },
+        make_health_detail(redis_healthy, "Redis unreachable"),
     );
-
     details.insert(
         "content_api".to_string(),
-        HealthDetail {
-            status: if content_healthy { "up" } else { "down" }.to_string(),
-            error: if content_healthy {
-                None
-            } else {
-                Some("No content API reachable".to_string())
-            },
-        },
+        make_health_detail(content_healthy, "No content API reachable"),
     );
 
     let status_code = if all_healthy {

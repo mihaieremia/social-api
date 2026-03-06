@@ -215,45 +215,20 @@ fn env_or_default<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 /// Scan environment for CONTENT_API_{TYPE}_URL variables.
-/// Converts the TYPE portion to lowercase with underscores.
+/// Extracts the TYPE portion, strips the prefix/suffix, and lowercases it.
 ///
 /// Example: CONTENT_API_POST_URL -> ("post", "http://...")
 ///          CONTENT_API_BONUS_HUNTER_URL -> ("bonus_hunter", "http://...")
 fn build_content_api_urls() -> HashMap<String, String> {
     let mut urls = HashMap::new();
 
-    // Known content types from spec
-    let known_types = [
-        ("CONTENT_API_POST_URL", "post"),
-        ("CONTENT_API_BONUS_HUNTER_URL", "bonus_hunter"),
-        ("CONTENT_API_TOP_PICKS_URL", "top_picks"),
-    ];
-
-    for (env_var, content_type) in &known_types {
-        if let Ok(url) = env::var(env_var)
-            && !url.is_empty()
-        {
-            urls.insert(content_type.to_string(), url);
-        }
-    }
-
-    // Also scan for any additional CONTENT_API_*_URL patterns
     for (key, value) in env::vars() {
-        if key.starts_with("CONTENT_API_")
-            && key.ends_with("_URL")
-            && !known_types.iter().any(|(k, _)| *k == key)
+        if let Some(type_name) = key
+            .strip_prefix("CONTENT_API_")
+            .and_then(|s| s.strip_suffix("_URL"))
+            && !value.is_empty()
         {
-            // Extract type name: CONTENT_API_NEWS_ARTICLE_URL -> news_article
-            let type_name = key
-                .strip_prefix("CONTENT_API_")
-                .and_then(|s| s.strip_suffix("_URL"))
-                .map(|s| s.to_lowercase());
-
-            if let Some(type_name) = type_name
-                && !value.is_empty()
-            {
-                urls.insert(type_name, value);
-            }
+            urls.insert(type_name.to_lowercase(), value);
         }
     }
 

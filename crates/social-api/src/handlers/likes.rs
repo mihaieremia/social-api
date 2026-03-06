@@ -23,6 +23,23 @@ fn validate_content_type(state: &AppState, content_type: &str) -> Result<(), App
     Ok(())
 }
 
+/// Validate that all content types in a batch are registered.
+fn validate_batch_content_types(state: &AppState, items: &[BatchItem]) -> Result<(), AppError> {
+    for item in items {
+        validate_content_type(state, &item.content_type)?;
+    }
+    Ok(())
+}
+
+/// Extract (content_type, content_id) tuples from a batch request.
+fn extract_batch_items(batch: BatchRequest) -> Vec<(String, Uuid)> {
+    batch
+        .items
+        .into_iter()
+        .map(|i| (i.content_type, i.content_id))
+        .collect()
+}
+
 /// POST /v1/likes — Like content
 #[utoipa::path(
     post,
@@ -190,16 +207,8 @@ pub async fn batch_counts(
     State(state): State<AppState>,
     Json(body): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    // Validate all content_types in the batch up-front
-    for item in &body.items {
-        validate_content_type(&state, &item.content_type)?;
-    }
-
-    let items: Vec<(String, Uuid)> = body
-        .items
-        .into_iter()
-        .map(|i| (i.content_type, i.content_id))
-        .collect();
+    validate_batch_content_types(&state, &body.items)?;
+    let items = extract_batch_items(body);
     let results = state.like_service().batch_counts(&items).await?;
     Ok((StatusCode::OK, Json(BatchCountsResponse { results })))
 }
@@ -222,16 +231,8 @@ pub async fn batch_statuses(
     AuthUser(user): AuthUser,
     Json(body): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    // Validate all content_types in the batch up-front
-    for item in &body.items {
-        validate_content_type(&state, &item.content_type)?;
-    }
-
-    let items: Vec<(String, Uuid)> = body
-        .items
-        .into_iter()
-        .map(|i| (i.content_type, i.content_id))
-        .collect();
+    validate_batch_content_types(&state, &body.items)?;
+    let items = extract_batch_items(body);
     let results = state
         .like_service()
         .batch_statuses(user.user_id, &items)

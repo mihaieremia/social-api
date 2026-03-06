@@ -239,11 +239,7 @@ impl CircuitBreaker {
                 // Clear window on close so stale failures don't re-trip via rate check.
                 inner.call_window.clear();
             }
-            CircuitState::HalfOpen => {
-                inner.consecutive_successes = 0;
-                inner.probe_in_flight = false;
-            }
-            CircuitState::Open => {
+            CircuitState::HalfOpen | CircuitState::Open => {
                 inner.consecutive_successes = 0;
                 inner.probe_in_flight = false;
             }

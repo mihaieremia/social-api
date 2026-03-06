@@ -112,30 +112,20 @@ impl LikeService {
         // This avoids the race where a concurrent request reads a stale db_count
         // from the reader pool and then conditional_incr double-counts.
         let count = result.count;
-        let cache_key = format!("lc:{content_type}:{content_id}");
-        self.cache
-            .set(
-                &cache_key,
-                &count.to_string(),
-                self.config.cache_ttl_like_counts_secs,
-            )
+        self.write_count_to_cache(content_type, content_id, count)
             .await;
 
         if !result.already_existed {
-            let event = serde_json::json!({
-                "event": "like",
-                "user_id": user_id,
-                "count": count,
-                "timestamp": result.row.created_at.to_rfc3339(),
-            });
-            let channel = format!("sse:{content_type}:{content_id}");
-            self.cache.publish(&channel, &event.to_string()).await;
-            metrics::counter!(
-                "social_api_likes_total",
-                "content_type" => content_type.to_string(),
-                "operation" => "like",
+            self.publish_like_event(
+                "like",
+                content_type,
+                content_id,
+                user_id,
+                count,
+                result.row.created_at,
             )
-            .increment(1);
+            .await;
+            Self::record_like_metric("like", content_type);
         }
 
         Ok(LikeActionResponse {
@@ -163,31 +153,21 @@ impl LikeService {
 
         // Use the authoritative count from the write transaction — same fix as like().
         let count = result.count;
-        let cache_key = format!("lc:{content_type}:{content_id}");
-        self.cache
-            .set(
-                &cache_key,
-                &count.to_string(),
-                self.config.cache_ttl_like_counts_secs,
-            )
+        self.write_count_to_cache(content_type, content_id, count)
             .await;
 
         // Publish SSE event
         if result.was_liked {
-            let event = serde_json::json!({
-                "event": "unlike",
-                "user_id": user_id,
-                "count": count,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
-            let channel = format!("sse:{content_type}:{content_id}");
-            self.cache.publish(&channel, &event.to_string()).await;
-            metrics::counter!(
-                "social_api_likes_total",
-                "content_type" => content_type.to_string(),
-                "operation" => "unlike",
+            self.publish_like_event(
+                "unlike",
+                content_type,
+                content_id,
+                user_id,
+                count,
+                chrono::Utc::now(),
             )
-            .increment(1);
+            .await;
+            Self::record_like_metric("unlike", content_type);
         }
 
         Ok(LikeActionResponse {
@@ -516,6 +496,56 @@ impl LikeService {
             content_type: content_type.map(|s| s.to_string()),
             items,
         })
+    }
+
+    /// Write an authoritative count to the cache with the configured TTL.
+    ///
+    /// Used by `like()` and `unlike()` after the DB transaction returns the
+    /// new total_count. This is a write-through pattern — the cache always
+    /// reflects the value the DB just told us.
+    async fn write_count_to_cache(&self, content_type: &str, content_id: Uuid, count: i64) {
+        let cache_key = format!("lc:{content_type}:{content_id}");
+        self.cache
+            .set(
+                &cache_key,
+                &count.to_string(),
+                self.config.cache_ttl_like_counts_secs,
+            )
+            .await;
+    }
+
+    /// Publish a like/unlike SSE event to the Redis pub/sub channel for the
+    /// given content item. The JSON envelope matches what SSE subscribers
+    /// expect: `{ event, user_id, count, timestamp }`.
+    async fn publish_like_event(
+        &self,
+        event_type: &str,
+        content_type: &str,
+        content_id: Uuid,
+        user_id: Uuid,
+        count: i64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
+        let event = serde_json::json!({
+            "event": event_type,
+            "user_id": user_id,
+            "count": count,
+            "timestamp": timestamp.to_rfc3339(),
+        });
+        let channel = format!("sse:{content_type}:{content_id}");
+        self.cache.publish(&channel, &event.to_string()).await;
+    }
+
+    /// Record a like/unlike operation metric.
+    ///
+    /// Associated function (no `&self`) — metrics are global counters.
+    fn record_like_metric(operation: &str, content_type: &str) {
+        metrics::counter!(
+            "social_api_likes_total",
+            "content_type" => content_type.to_string(),
+            "operation" => operation.to_string(),
+        )
+        .increment(1);
     }
 
     /// Map a sqlx error to AppError::Database.
