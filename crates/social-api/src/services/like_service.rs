@@ -82,12 +82,12 @@ impl LikeService {
         // Insert first to determine if this is a new or duplicate request.
         // Duplicate detection must happen before content validation so we can
         // skip the external HTTP call for requests we've already processed.
-        let (like_row, already_existed) =
+        let result =
             like_repository::insert_like(&self.db.writer, user_id, content_type, content_id)
                 .await
                 .map_err(Self::db_err)?;
 
-        if !already_existed {
+        if !result.already_existed {
             // Content validation is skipped for duplicate likes.
             // Rationale: if this like already exists, the content was valid at the time it was
             // first created. Re-validating on every duplicate request would fire a redundant
@@ -108,22 +108,25 @@ impl LikeService {
             }
         }
 
-        let count = if !already_existed {
-            let cache_key = format!("lc:{content_type}:{content_id}");
-            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(Self::db_err)?;
-            self.update_count_cache(&cache_key, 1, db_count).await
-        } else {
-            self.get_count_inner(content_type, content_id).await?
-        };
+        // Use the authoritative count from the write transaction.
+        // This avoids the race where a concurrent request reads a stale db_count
+        // from the reader pool and then conditional_incr double-counts.
+        let count = result.count;
+        let cache_key = format!("lc:{content_type}:{content_id}");
+        self.cache
+            .set(
+                &cache_key,
+                &count.to_string(),
+                self.config.cache_ttl_like_counts_secs,
+            )
+            .await;
 
-        if !already_existed {
+        if !result.already_existed {
             let event = serde_json::json!({
                 "event": "like",
                 "user_id": user_id,
                 "count": count,
-                "timestamp": like_row.created_at.to_rfc3339(),
+                "timestamp": result.row.created_at.to_rfc3339(),
             });
             let channel = format!("sse:{content_type}:{content_id}");
             self.cache.publish(&channel, &event.to_string()).await;
@@ -137,10 +140,10 @@ impl LikeService {
 
         Ok(LikeActionResponse {
             liked: true,
-            already_existed: Some(already_existed),
+            already_existed: Some(result.already_existed),
             was_liked: None,
             count,
-            liked_at: Some(like_row.created_at),
+            liked_at: Some(result.row.created_at),
         })
     }
 
@@ -153,24 +156,24 @@ impl LikeService {
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        let was_liked =
+        let result =
             like_repository::delete_like(&self.db.writer, user_id, content_type, content_id)
                 .await
                 .map_err(Self::db_err)?;
 
-        // Update cache with conditional DECR (safe against expired keys)
-        let count = if was_liked {
-            let cache_key = format!("lc:{content_type}:{content_id}");
-            let db_count = like_repository::get_count(&self.db.reader, content_type, content_id)
-                .await
-                .map_err(Self::db_err)?;
-            self.update_count_cache(&cache_key, -1, db_count).await
-        } else {
-            self.get_count_inner(content_type, content_id).await?
-        };
+        // Use the authoritative count from the write transaction — same fix as like().
+        let count = result.count;
+        let cache_key = format!("lc:{content_type}:{content_id}");
+        self.cache
+            .set(
+                &cache_key,
+                &count.to_string(),
+                self.config.cache_ttl_like_counts_secs,
+            )
+            .await;
 
         // Publish SSE event
-        if was_liked {
+        if result.was_liked {
             let event = serde_json::json!({
                 "event": "unlike",
                 "user_id": user_id,
@@ -190,7 +193,7 @@ impl LikeService {
         Ok(LikeActionResponse {
             liked: false,
             already_existed: None,
-            was_liked: Some(was_liked),
+            was_liked: Some(result.was_liked),
             count,
             liked_at: None,
         })
@@ -519,18 +522,6 @@ impl LikeService {
     /// Centralizes the repeated `.map_err(|e| AppError::Database(e.to_string()))` pattern.
     fn db_err(e: sqlx::Error) -> AppError {
         AppError::Database(e.to_string())
-    }
-
-    /// Apply a conditional INCR (delta > 0) or DECR (delta < 0) to the count cache.
-    /// Returns the new count, falling back to `db_count` on cache error.
-    async fn update_count_cache(&self, key: &str, delta: i64, db_count: i64) -> i64 {
-        let ttl = self.config.cache_ttl_like_counts_secs;
-        let result = if delta > 0 {
-            self.cache.conditional_incr(key, ttl, db_count).await
-        } else {
-            self.cache.conditional_decr(key, ttl, db_count).await
-        };
-        result.unwrap_or(db_count)
     }
 
     /// Validate content exists via external Content API (with circuit breaker).

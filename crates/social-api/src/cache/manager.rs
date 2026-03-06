@@ -15,6 +15,7 @@ pub type RedisPool = Pool<RedisConnectionManager>;
 
 /// Lua script: atomically INCR an existing key or SET from DB count if missing.
 /// Prevents ghost counts when INCR is called on an expired/non-existent key.
+#[allow(dead_code)]
 static CONDITIONAL_INCR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r#"
@@ -35,6 +36,7 @@ end
 });
 
 /// Lua script: atomically DECR an existing key (floor at 0) or SET from DB count.
+#[allow(dead_code)]
 static CONDITIONAL_DECR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r#"
@@ -145,6 +147,7 @@ impl CacheManager {
 
     /// Conditionally INCR: if key exists, INCR + refresh TTL. If missing, SET to db_count.
     /// Prevents ghost counts when INCR hits an expired key.
+    #[allow(dead_code)]
     pub async fn conditional_incr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
@@ -177,6 +180,7 @@ impl CacheManager {
     }
 
     /// Conditionally DECR: if key exists, DECR (floor 0) + refresh TTL. If missing, SET to db_count.
+    #[allow(dead_code)]
     pub async fn conditional_decr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
         let mut conn = match self.pool.get().await {
             Ok(c) => c,

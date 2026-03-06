@@ -13,14 +13,25 @@ pub struct LikeRow {
     pub created_at: DateTime<Utc>,
 }
 
-/// Insert a like. Returns the row if inserted, None if already existed (idempotent).
-/// Atomically increments like_counts in a single transaction.
+/// Result of an insert_like operation.
+/// Contains the like row, whether it already existed, and the authoritative
+/// count from the `like_counts` table (read within the same transaction).
+pub struct InsertLikeResult {
+    pub row: LikeRow,
+    pub already_existed: bool,
+    /// Authoritative total_count from `like_counts`, read inside the write
+    /// transaction. Safe to use as the cache value — no read-replica lag.
+    pub count: i64,
+}
+
+/// Insert a like. Returns the row, existence flag, and authoritative count.
+/// Atomically increments like_counts and returns the new count in a single transaction.
 pub async fn insert_like(
     pool: &PgPool,
     user_id: Uuid,
     content_type: &str,
     content_id: Uuid,
-) -> Result<(LikeRow, bool), sqlx::Error> {
+) -> Result<InsertLikeResult, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     // INSERT ON CONFLICT DO NOTHING - idempotent
@@ -40,26 +51,44 @@ pub async fn insert_like(
 
     match row {
         Some(like_row) => {
-            // New like - increment count atomically
-            sqlx::query(
+            // New like - increment count atomically and return new total
+            let (count,): (i64,) = sqlx::query_as(
                 r#"
                 INSERT INTO like_counts (content_type, content_id, total_count, updated_at)
                 VALUES ($1, $2, 1, NOW())
                 ON CONFLICT (content_type, content_id)
                 DO UPDATE SET total_count = like_counts.total_count + 1, updated_at = NOW()
+                RETURNING total_count
                 "#,
             )
             .bind(content_type)
             .bind(content_id)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
 
             tx.commit().await?;
-            Ok((like_row, false)) // (row, already_existed=false)
+            Ok(InsertLikeResult {
+                row: like_row,
+                already_existed: false,
+                count,
+            })
         }
         None => {
-            // Already existed - fetch the existing row
+            // Already existed - fetch the existing row and current count
+            let count: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COALESCE(total_count, 0) FROM like_counts
+                WHERE content_type = $1 AND content_id = $2
+                "#,
+            )
+            .bind(content_type)
+            .bind(content_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
+
             tx.commit().await?;
+
             let existing = sqlx::query_as::<_, LikeRow>(
                 r#"
                 SELECT id, content_type, content_id, created_at
@@ -73,19 +102,30 @@ pub async fn insert_like(
             .fetch_one(pool)
             .await?;
 
-            Ok((existing, true)) // (row, already_existed=true)
+            Ok(InsertLikeResult {
+                row: existing,
+                already_existed: true,
+                count,
+            })
         }
     }
 }
 
-/// Delete a like. Returns true if a row was deleted.
-/// Atomically decrements like_counts in a single transaction.
+/// Result of a delete_like operation.
+pub struct DeleteLikeResult {
+    pub was_liked: bool,
+    /// Authoritative total_count from `like_counts`, read inside the write transaction.
+    pub count: i64,
+}
+
+/// Delete a like. Returns whether the row existed and the authoritative count.
+/// Atomically decrements like_counts and returns the new count in a single transaction.
 pub async fn delete_like(
     pool: &PgPool,
     user_id: Uuid,
     content_type: &str,
     content_id: Uuid,
-) -> Result<bool, sqlx::Error> {
+) -> Result<DeleteLikeResult, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     let result = sqlx::query(
@@ -101,24 +141,44 @@ pub async fn delete_like(
     .await?;
 
     if result.rows_affected() > 0 {
-        // Decrement count atomically
-        sqlx::query(
+        // Decrement count atomically and return new total
+        let (count,): (i64,) = sqlx::query_as(
             r#"
             UPDATE like_counts
             SET total_count = GREATEST(total_count - 1, 0), updated_at = NOW()
+            WHERE content_type = $1 AND content_id = $2
+            RETURNING total_count
+            "#,
+        )
+        .bind(content_type)
+        .bind(content_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(DeleteLikeResult {
+            was_liked: true,
+            count,
+        })
+    } else {
+        // Not liked — read current count
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(total_count, 0) FROM like_counts
             WHERE content_type = $1 AND content_id = $2
             "#,
         )
         .bind(content_type)
         .bind(content_id)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
 
         tx.commit().await?;
-        Ok(true)
-    } else {
-        tx.commit().await?;
-        Ok(false)
+        Ok(DeleteLikeResult {
+            was_liked: false,
+            count,
+        })
     }
 }
 
@@ -374,13 +434,14 @@ mod tests {
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
-        let (row, existed) = insert_like(&pool, user_id, "post", content_id)
+        let result = insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
 
-        assert!(!existed);
-        assert_eq!(row.content_type, "post");
-        assert_eq!(row.content_id, content_id);
+        assert!(!result.already_existed);
+        assert_eq!(result.row.content_type, "post");
+        assert_eq!(result.row.content_id, content_id);
+        assert_eq!(result.count, 1);
     }
 
     #[tokio::test]
@@ -392,11 +453,14 @@ mod tests {
         insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
-        let (_, existed) = insert_like(&pool, user_id, "post", content_id)
+        let result = insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
 
-        assert!(existed, "second insert must report already_existed=true");
+        assert!(
+            result.already_existed,
+            "second insert must report already_existed=true"
+        );
     }
 
     #[tokio::test]
@@ -408,20 +472,20 @@ mod tests {
         insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
-        let was_liked = delete_like(&pool, user_id, "post", content_id)
+        let result = delete_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
 
-        assert!(was_liked);
+        assert!(result.was_liked);
     }
 
     #[tokio::test]
     async fn test_delete_like_not_existing() {
         let pool = setup_pg().await;
-        let was_liked = delete_like(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
+        let result = delete_like(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
             .await
             .unwrap();
-        assert!(!was_liked);
+        assert!(!result.was_liked);
     }
 
     #[tokio::test]
@@ -564,15 +628,15 @@ mod tests {
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
-        let (_, first) = insert_like(&pool, user_id, "post", content_id)
+        let first = insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
-        let (_, second) = insert_like(&pool, user_id, "post", content_id)
+        let second = insert_like(&pool, user_id, "post", content_id)
             .await
             .unwrap();
 
-        assert!(!first);
-        assert!(second);
+        assert!(!first.already_existed);
+        assert!(second.already_existed);
 
         let count = get_count(&pool, "post", content_id).await.unwrap();
         assert_eq!(count, 1, "duplicate like must not increment count");
