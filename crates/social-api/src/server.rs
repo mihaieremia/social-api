@@ -13,28 +13,103 @@ use crate::middleware;
 use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
-/// Custom `MakeSpan` that pre-registers `request_id` and `user_id` as empty fields.
+/// Access log verbosity level (set via `ACCESS_LOG` env var).
 ///
-/// - `request_id` is recorded by `inject_request_id` middleware (runs inside this span).
-/// - `user_id` is recorded by `AuthUser` extractor on authenticated requests.
+/// - `full`: log every request at INFO (development / low-traffic).
+/// - `errors`: log only 4xx/5xx or requests slower than 500ms (production default).
+/// - `none`: suppress all per-request logs; rely on Prometheus metrics only.
+#[derive(Clone, Copy, PartialEq)]
+pub enum AccessLogLevel {
+    Full,
+    Errors,
+    None,
+}
+
+impl AccessLogLevel {
+    pub fn from_env() -> Self {
+        match std::env::var("ACCESS_LOG")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "full" | "all" => Self::Full,
+            "none" | "off" | "false" | "0" => Self::None,
+            // Default: only log noteworthy requests
+            _ => Self::Errors,
+        }
+    }
+}
+
+/// Custom `MakeSpan` that creates spans at the appropriate level based on access log config.
+///
+/// At `errors`/`none` mode, uses `debug_span!` so span creation is nearly free when
+/// RUST_LOG filters out debug. At `full` mode, uses `info_span!` for complete logging.
+///
+/// Fields `request_id` and `user_id` are recorded by downstream middleware/extractors.
 #[derive(Clone)]
-struct MakeRequestSpan;
+struct MakeRequestSpan {
+    level: AccessLogLevel,
+}
 
 impl<B> tower_http::trace::MakeSpan<B> for MakeRequestSpan {
     fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
-        tracing::info_span!(
-            "request",
-            method = %request.method(),
-            path = %request.uri().path(),
-            request_id = tracing::field::Empty,
-            user_id = tracing::field::Empty,
-        )
+        match self.level {
+            AccessLogLevel::Full => tracing::info_span!(
+                "request",
+                method = %request.method(),
+                path = %request.uri().path(),
+                request_id = tracing::field::Empty,
+                user_id = tracing::field::Empty,
+            ),
+            _ => tracing::debug_span!(
+                "request",
+                method = %request.method(),
+                path = %request.uri().path(),
+                request_id = tracing::field::Empty,
+                user_id = tracing::field::Empty,
+            ),
+        }
+    }
+}
+
+/// Custom `OnResponse` that conditionally logs based on access log level.
+///
+/// - `Full`: log every response at INFO with latency.
+/// - `Errors`: log only 4xx/5xx status codes or slow requests (>500ms) at WARN.
+/// - `None`: no per-request logging at all (metrics handle observability).
+#[derive(Clone)]
+struct ConditionalOnResponse {
+    level: AccessLogLevel,
+}
+
+impl<B> tower_http::trace::OnResponse<B> for ConditionalOnResponse {
+    fn on_response(
+        self,
+        response: &axum::http::Response<B>,
+        latency: std::time::Duration,
+        _span: &tracing::Span,
+    ) {
+        let status = response.status().as_u16();
+        let latency_ms = latency.as_secs_f64() * 1000.0;
+
+        match self.level {
+            AccessLogLevel::Full => {
+                tracing::info!(status, latency_ms, "response");
+            }
+            AccessLogLevel::Errors => {
+                if status >= 400 || latency_ms > 500.0 {
+                    tracing::warn!(status, latency_ms, "slow or error response");
+                }
+            }
+            AccessLogLevel::None => {}
+        }
     }
 }
 
 /// Build the Axum router with all routes and middleware.
 pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router {
     let concurrency_limit = state.config().server_concurrency_limit;
+    let access_log = AccessLogLevel::from_env();
     let health_routes = Router::new()
         .route("/health/live", get(handlers::health::liveness))
         .route("/health/ready", get(handlers::health::readiness))
@@ -108,12 +183,8 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .layer(ConcurrencyLimitLayer::new(concurrency_limit))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(MakeRequestSpan)
-                .on_response(
-                    tower_http::trace::DefaultOnResponse::new()
-                        .level(tracing::Level::INFO)
-                        .latency_unit(tower_http::LatencyUnit::Millis),
-                ),
+                .make_span_with(MakeRequestSpan { level: access_log })
+                .on_response(ConditionalOnResponse { level: access_log }),
         );
 
     Router::new()

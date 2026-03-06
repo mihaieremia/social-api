@@ -87,8 +87,9 @@ services:
       SERVER_CONCURRENCY_LIMIT: "10000"
       RATE_LIMIT_READ_PER_MINUTE: "1000000"
       RATE_LIMIT_WRITE_PER_MINUTE: "100000"
-      RUST_LOG: social_api=info,tower_http=info
+      RUST_LOG: social_api=info,tower_http=warn
       LOG_LEVEL: info
+      ACCESS_LOG: errors
     ports:
       - "8080:8080"
     depends_on:
