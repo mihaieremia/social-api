@@ -1,6 +1,7 @@
 mod content;
 mod data;
 mod profile;
+mod proto;
 
 use axum::{Router, routing::get};
 use std::net::SocketAddr;

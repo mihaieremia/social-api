@@ -8,6 +8,7 @@ mod handlers;
 mod logging;
 mod middleware;
 mod openapi;
+mod proto;
 mod repositories;
 mod server;
 mod services;

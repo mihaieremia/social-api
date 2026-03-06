@@ -55,6 +55,12 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
+# gRPC
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
 async-trait = "0.1"
 async-stream = "0.3"
 tokio-stream = "0.1"
@@ -64,6 +70,9 @@ futures = "0.3"
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

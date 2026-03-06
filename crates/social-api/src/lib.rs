@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod logging;
 pub mod middleware;
 pub mod openapi;
+pub mod proto;
 pub mod repositories;
 pub mod server;
 pub mod services;
