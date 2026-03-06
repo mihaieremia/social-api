@@ -21,7 +21,7 @@ use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig}
 use social_api::clients::content_client::ContentValidator;
 use social_api::config::Config;
 use social_api::db::DbPools;
-use social_api::middleware::rate_limit::check_rate_limit_public;
+use social_api::middleware::rate_limit::check_rate_limit_inner;
 use social_api::repositories::like_repository;
 use social_api::services::like_service::LikeService;
 use social_api::services::pubsub_manager::PubSubManager;
@@ -764,7 +764,8 @@ async fn test_rate_limiter_accuracy_under_concurrency() {
 
         handles.push(tokio::spawn(async move {
             bar.wait().await;
-            check_rate_limit_public(&c, &k, limit, 60).await
+            let r = check_rate_limit_inner(&c, &k, limit, 60).await;
+            (r.allowed, r.current)
         }));
     }
 
@@ -799,7 +800,8 @@ async fn test_rate_limiter_accuracy_under_concurrency() {
 
     let mut still_blocked = 0;
     for _ in 0..50 {
-        let (allowed, _) = check_rate_limit_public(&cache, &key, limit, 60).await;
+        let r = check_rate_limit_inner(&cache, &key, limit, 60).await;
+        let (allowed, _) = (r.allowed, r.current);
         if !allowed {
             still_blocked += 1;
         }

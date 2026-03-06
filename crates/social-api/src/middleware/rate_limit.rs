@@ -65,15 +65,15 @@ return {1, count + 1, limit, reset_ms}
 });
 
 /// Rate limit result.
-struct RateLimitResult {
-    allowed: bool,
-    current: i64,
-    limit: i64,
-    reset_secs: u64,
+pub struct RateLimitResult {
+    pub allowed: bool,
+    pub current: i64,
+    pub limit: i64,
+    pub reset_secs: u64,
 }
 
 /// Check rate limit using Redis sliding window.
-async fn check_rate_limit_inner(
+pub async fn check_rate_limit_inner(
     cache: &CacheManager,
     key: &str,
     limit: u64,
@@ -252,7 +252,7 @@ pub async fn read_rate_limit(
 /// Deterministic FNV-1a hash for rate limit keys.
 /// Unlike DefaultHasher (SipHash with random seeds), FNV-1a produces identical
 /// hashes across all replicas, ensuring correct per-user/per-IP rate limiting.
-fn fnv1a_hash(input: &str) -> u64 {
+pub fn fnv1a_hash(input: &str) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x00000100000001B3;
     let mut hash = FNV_OFFSET;
@@ -261,18 +261,6 @@ fn fnv1a_hash(input: &str) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
-}
-
-/// Public wrapper for integration/stress tests.
-#[allow(dead_code)]
-pub async fn check_rate_limit_public(
-    cache: &CacheManager,
-    key: &str,
-    limit: u64,
-    window_secs: u64,
-) -> (bool, i64) {
-    let result = check_rate_limit_inner(cache, key, limit, window_secs).await;
-    (result.allowed, result.current)
 }
 
 #[cfg(test)]
