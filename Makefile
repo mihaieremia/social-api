@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 
 BASE_URL        ?= http://localhost:8080
-TARGET_RPS      ?= 100000
+TARGET_RPS      ?= 15000
 STRESS_DURATION ?= 30m
 COMPOSE         := docker compose
 COMPOSE_TEST    := docker compose -f docker-compose.yml -f docker-compose.test.yml

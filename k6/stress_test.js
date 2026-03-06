@@ -12,8 +12,10 @@ const SCENARIO = __ENV.K6_SCENARIO || 'stress';
 // Duration for sustained phase (default 30m)
 const SUSTAIN_DURATION = __ENV.STRESS_DURATION || '30m';
 
-// Target RPS for stress test (default 100k)
-const TARGET_RPS = parseInt(__ENV.STRESS_TARGET_RPS || '100000');
+// Target RPS for stress test.
+// Default 15K: sustainable on Docker for Mac (VM networking overhead).
+// On native Linux, override to 100K+: make k6-stress TARGET_RPS=100000
+const TARGET_RPS = parseInt(__ENV.STRESS_TARGET_RPS || '15000');
 
 // 20 auth tokens matching mock-services data.rs
 const TOKENS = Array.from({ length: 20 }, (_, i) => `tok_user_${i + 1}`);
