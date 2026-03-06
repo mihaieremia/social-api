@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod errors;
 mod extractors;
+mod grpc;
 mod handlers;
 mod logging;
 mod middleware;

@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod errors;
 pub mod extractors;
+pub mod grpc;
 pub mod handlers;
 pub mod logging;
 pub mod middleware;
