@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package internal.v1;
+
+// Internal service for validating content existence.
+// Used by social-api to verify that a content item exists before accepting a like.
+service ContentService {
+  // Validate whether a content item exists.
+  rpc Validate(ValidateContentRequest) returns (ValidateContentResponse);
+}
+
+message ValidateContentRequest {
+  // Content type identifier (e.g. "post", "article").
+  string content_type = 1;
+  // Content UUID as a string.
+  string content_id = 2;
+}
+
+message ValidateContentResponse {
+  // True if the content item exists and is valid.
+  bool exists = 1;
+}

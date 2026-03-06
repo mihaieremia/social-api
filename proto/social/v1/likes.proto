@@ -1,0 +1,194 @@
+syntax = "proto3";
+
+package social.v1;
+
+import "social/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Service for managing likes on content items.
+service LikeService {
+  // Like a content item. Requires authentication. Write rate limited.
+  rpc Like(LikeRequest) returns (LikeResponse);
+
+  // Remove a like from a content item. Requires authentication. Write rate limited.
+  rpc Unlike(UnlikeRequest) returns (LikeResponse);
+
+  // Get the like count for a content item. Read rate limited.
+  rpc GetCount(GetCountRequest) returns (CountResponse);
+
+  // Check whether the authenticated user has liked a content item. Read rate limited.
+  rpc GetStatus(GetStatusRequest) returns (StatusResponse);
+
+  // Get like counts for multiple content items in one call. Read rate limited.
+  rpc BatchCounts(BatchCountsRequest) returns (BatchCountsResponse);
+
+  // Get like statuses for multiple content items for the authenticated user. Read rate limited.
+  rpc BatchStatuses(BatchStatusesRequest) returns (BatchStatusesResponse);
+
+  // List all content the authenticated user has liked, with cursor pagination. Read rate limited.
+  rpc GetUserLikes(GetUserLikesRequest) returns (UserLikesResponse);
+
+  // Get the top-liked content leaderboard for a time window. Read rate limited.
+  rpc GetLeaderboard(LeaderboardRequest) returns (LeaderboardResponse);
+
+  // Subscribe to real-time like/unlike events for a content item. Server streaming. Read rate limited.
+  rpc StreamLikes(StreamRequest) returns (stream LikeEvent);
+}
+
+// ─── Request Messages ────────────────────────────────────────────
+
+message LikeRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message UnlikeRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message GetCountRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message GetStatusRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+message BatchCountsRequest {
+  repeated ContentRef items = 1;
+}
+
+message BatchStatusesRequest {
+  repeated ContentRef items = 1;
+}
+
+message GetUserLikesRequest {
+  PaginationRequest pagination = 1;
+  // Optional filter by content type.
+  optional string content_type = 2;
+}
+
+message LeaderboardRequest {
+  TimeWindow window = 1;
+  // Optional filter by content type.
+  optional string content_type = 2;
+  int32 limit = 3;
+}
+
+message StreamRequest {
+  string content_type = 1;
+  string content_id = 2;
+}
+
+// ─── Response Messages ───────────────────────────────────────────
+
+// Returned after a Like or Unlike action.
+message LikeResponse {
+  // Whether the content is currently liked by the user.
+  bool liked = 1;
+  // Set on Like: true if the like already existed (idempotent).
+  optional bool already_existed = 2;
+  // Set on Unlike: true if the content was liked before removal.
+  optional bool was_liked = 3;
+  // Current total like count for the content.
+  int64 count = 4;
+  // Timestamp of the like, present when liked=true.
+  optional google.protobuf.Timestamp liked_at = 5;
+}
+
+// Like count for a single content item.
+message CountResponse {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+}
+
+// Like status for a single content item (relative to the authenticated user).
+message StatusResponse {
+  string content_type = 1;
+  string content_id = 2;
+  bool liked = 3;
+  optional google.protobuf.Timestamp liked_at = 4;
+}
+
+// Batch like counts response.
+message BatchCountsResponse {
+  repeated CountResponse results = 1;
+}
+
+// Batch like statuses response.
+message BatchStatusesResponse {
+  repeated StatusResponse results = 1;
+}
+
+// A liked item in the user's like history.
+message LikeItem {
+  string content_type = 1;
+  string content_id = 2;
+  google.protobuf.Timestamp liked_at = 3;
+}
+
+// Paginated list of user likes.
+message UserLikesResponse {
+  repeated LikeItem items = 1;
+  PaginationInfo pagination = 2;
+}
+
+// A content item on the leaderboard.
+message TopLikedItem {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+}
+
+// Leaderboard response.
+message LeaderboardResponse {
+  repeated TopLikedItem items = 1;
+  // The time window used (e.g. "24h", "7d", "30d", "all").
+  string window = 2;
+  // The content type filter applied, if any.
+  optional string content_type = 3;
+}
+
+// ─── Streaming Event Messages ────────────────────────────────────
+
+// A real-time event from the like stream (replaces SSE).
+message LikeEvent {
+  oneof event {
+    LikeOccurred liked = 1;
+    UnlikeOccurred unliked = 2;
+    Heartbeat heartbeat = 3;
+    Shutdown shutdown = 4;
+  }
+}
+
+// Emitted when a user likes a content item.
+message LikeOccurred {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+  string user_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+// Emitted when a user unlikes a content item.
+message UnlikeOccurred {
+  string content_type = 1;
+  string content_id = 2;
+  int64 count = 3;
+  string user_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+// Periodic keep-alive signal.
+message Heartbeat {
+  google.protobuf.Timestamp timestamp = 1;
+}
+
+// Server is shutting down; client should reconnect.
+message Shutdown {
+  google.protobuf.Timestamp timestamp = 1;
+}

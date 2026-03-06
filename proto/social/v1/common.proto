@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package social.v1;
+
+// Shared messages used across the social API gRPC services.
+
+// Reference to a specific content item.
+message ContentRef {
+  // Content type identifier (e.g. "post", "article").
+  string content_type = 1;
+  // Content UUID as a string (e.g. "731b0395-4888-4822-b516-05b4b7bf2089").
+  string content_id = 2;
+}
+
+// Cursor-based pagination parameters.
+message PaginationRequest {
+  // Opaque cursor from a previous response. Omit for the first page.
+  optional string cursor = 1;
+  // Maximum number of items to return.
+  int32 limit = 2;
+}
+
+// Pagination metadata returned with paginated responses.
+message PaginationInfo {
+  // Cursor to pass in the next request. Absent when no more pages.
+  optional string next_cursor = 1;
+  // Whether more items exist beyond this page.
+  bool has_more = 2;
+}
+
+// Time window for leaderboard queries.
+enum TimeWindow {
+  TIME_WINDOW_UNSPECIFIED = 0;
+  TIME_WINDOW_DAY = 1;   // 24h
+  TIME_WINDOW_WEEK = 2;  // 7d
+  TIME_WINDOW_MONTH = 3; // 30d
+  TIME_WINDOW_ALL = 4;   // all time
+}

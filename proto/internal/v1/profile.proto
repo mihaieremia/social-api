@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package internal.v1;
+
+// Internal service for validating bearer tokens and resolving user identity.
+// Used by social-api to authenticate incoming requests.
+service ProfileService {
+  // Validate a bearer token and return the associated user identity.
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+}
+
+message ValidateTokenRequest {
+  // The bearer token to validate (without the "Bearer " prefix).
+  string token = 1;
+}
+
+message ValidateTokenResponse {
+  // Whether the token is valid.
+  bool valid = 1;
+  // The user's UUID as a string. Present when valid=true.
+  string user_id = 2;
+  // The user's display name. Present when valid=true.
+  string display_name = 3;
+}
