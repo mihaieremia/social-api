@@ -72,8 +72,11 @@ impl AppState {
             content_breaker.clone(),
         );
 
-        let pubsub_manager =
-            PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
+        let pubsub_manager = PubSubManager::new(
+            config.redis_url.clone(),
+            config.sse_broadcast_capacity,
+            shutdown_token.clone(),
+        );
 
         Self {
             inner: Arc::new(AppStateInner {
@@ -156,8 +159,11 @@ impl AppState {
     ) -> Self {
         let profile_breaker = build_profile_breaker(&config);
         let http_client = reqwest::Client::new();
-        let pubsub_manager =
-            PubSubManager::new(config.redis_url.clone(), config.sse_broadcast_capacity);
+        let pubsub_manager = PubSubManager::new(
+            config.redis_url.clone(),
+            config.sse_broadcast_capacity,
+            shutdown_token.clone(),
+        );
         Self {
             inner: Arc::new(AppStateInner {
                 db,

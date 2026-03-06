@@ -634,7 +634,11 @@ async fn test_sse_fanout_throughput() {
     let num_subscribers = 100;
     let num_messages = 100;
 
-    let manager = PubSubManager::new(redis_url.clone(), 256);
+    let manager = PubSubManager::new(
+        redis_url.clone(),
+        256,
+        tokio_util::sync::CancellationToken::new(),
+    );
 
     eprintln!("  Creating {num_subscribers} subscribers...");
     let mut receivers = Vec::with_capacity(num_subscribers);

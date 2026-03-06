@@ -4,6 +4,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// Manages shared Redis Pub/Sub subscriptions with in-process fan-out.
 ///
@@ -14,6 +15,7 @@ use tokio::sync::broadcast;
 /// Hardened with:
 /// - **DashMap** for lock-free concurrent channel access (no Mutex contention)
 /// - **Auto-reconnect** with exponential backoff on Redis failures
+/// - **CancellationToken** for clean shutdown — bridge tasks exit immediately
 /// - **Configurable broadcast buffer** via `SSE_BROADCAST_CAPACITY` env var
 #[derive(Clone)]
 pub struct PubSubManager {
@@ -23,6 +25,7 @@ pub struct PubSubManager {
 struct PubSubManagerInner {
     redis_url: String,
     broadcast_capacity: usize,
+    shutdown_token: CancellationToken,
     /// Lock-free concurrent map: channel name -> broadcast sender.
     channels: DashMap<String, broadcast::Sender<String>>,
 }
@@ -38,11 +41,16 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 impl PubSubManager {
-    pub fn new(redis_url: String, broadcast_capacity: usize) -> Self {
+    pub fn new(
+        redis_url: String,
+        broadcast_capacity: usize,
+        shutdown_token: CancellationToken,
+    ) -> Self {
         Self {
             inner: Arc::new(PubSubManagerInner {
                 redis_url,
                 broadcast_capacity,
+                shutdown_token,
                 channels: DashMap::new(),
             }),
         }
@@ -87,9 +95,10 @@ impl PubSubManager {
         let redis_url = self.inner.redis_url.clone();
         let channel_name = channel.to_string();
         let channels_ref = self.inner.channels.clone();
+        let shutdown = self.inner.shutdown_token.clone();
 
         tokio::spawn(async move {
-            run_bridge_with_reconnect(&redis_url, &channel_name, &tx).await;
+            run_bridge_with_reconnect(&redis_url, &channel_name, &tx, &shutdown).await;
 
             // Clean up: only remove if no receivers remain (avoid race with new subscriber)
             if let Some(entry) = channels_ref.get(&channel_name)
@@ -113,18 +122,32 @@ impl PubSubManager {
 
 /// Runs the pub/sub bridge with automatic reconnection on failure.
 /// Retries with exponential backoff up to MAX_RECONNECT_ATTEMPTS.
-/// Exits permanently when all receivers are dropped or retries exhausted.
-async fn run_bridge_with_reconnect(redis_url: &str, channel: &str, tx: &broadcast::Sender<String>) {
+/// Exits permanently when shutdown is triggered, all receivers drop,
+/// or retries are exhausted.
+async fn run_bridge_with_reconnect(
+    redis_url: &str,
+    channel: &str,
+    tx: &broadcast::Sender<String>,
+    shutdown: &CancellationToken,
+) {
     let mut attempt: u32 = 0;
 
     loop {
-        // Bail if no subscribers remain
+        // Bail on shutdown or no subscribers
+        if shutdown.is_cancelled() {
+            tracing::debug!(channel = %channel, "Bridge exiting (shutdown)");
+            return;
+        }
         if tx.receiver_count() == 0 {
             tracing::debug!(channel = %channel, "No subscribers, bridge exiting");
             return;
         }
 
-        match run_single_connection(redis_url, channel, tx).await {
+        match run_single_connection(redis_url, channel, tx, shutdown).await {
+            BridgeExit::Shutdown => {
+                tracing::debug!(channel = %channel, "Bridge stopped (shutdown signal)");
+                return;
+            }
             BridgeExit::NoReceivers => {
                 tracing::debug!(channel = %channel, "All receivers dropped, bridge exiting");
                 return;
@@ -153,7 +176,14 @@ async fn run_bridge_with_reconnect(redis_url: &str, channel: &str, tx: &broadcas
                     "Pub/Sub bridge disconnected, reconnecting"
                 );
 
-                tokio::time::sleep(backoff).await;
+                // Interruptible backoff — cancel immediately on shutdown
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        tracing::debug!(channel = %channel, "Bridge exiting during backoff (shutdown)");
+                        return;
+                    }
+                    _ = tokio::time::sleep(backoff) => {}
+                }
 
                 // Check again before reconnecting
                 if tx.receiver_count() == 0 {
@@ -167,6 +197,8 @@ async fn run_bridge_with_reconnect(redis_url: &str, channel: &str, tx: &broadcas
 
 /// Result of a single bridge connection lifecycle.
 enum BridgeExit {
+    /// Shutdown token was cancelled.
+    Shutdown,
     /// All broadcast receivers dropped — no one is listening.
     NoReceivers,
     /// Redis connection failed or stream ended unexpectedly.
@@ -179,6 +211,7 @@ async fn run_single_connection(
     redis_url: &str,
     channel: &str,
     tx: &broadcast::Sender<String>,
+    shutdown: &CancellationToken,
 ) -> BridgeExit {
     // Connect to Redis
     let client = match redis::Client::open(redis_url) {
@@ -197,7 +230,6 @@ async fn run_single_connection(
 
     tracing::debug!(channel = %channel, "Pub/Sub bridge connected");
 
-    // Reset reconnect counter on successful connection (caller tracks this)
     let exit_reason;
 
     {
@@ -208,20 +240,27 @@ async fn run_single_connection(
                 break BridgeExit::NoReceivers;
             }
 
-            match tokio::time::timeout(IDLE_CHECK_INTERVAL, msg_stream.next()).await {
-                Ok(Some(msg)) => {
-                    if let Ok(payload) = msg.get_payload::<String>()
-                        && tx.send(payload).is_err()
-                    {
-                        break BridgeExit::NoReceivers;
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    break BridgeExit::Shutdown;
+                }
+                result = tokio::time::timeout(IDLE_CHECK_INTERVAL, msg_stream.next()) => {
+                    match result {
+                        Ok(Some(msg)) => {
+                            if let Ok(payload) = msg.get_payload::<String>()
+                                && tx.send(payload).is_err()
+                            {
+                                break BridgeExit::NoReceivers;
+                            }
+                        }
+                        Ok(None) => {
+                            break BridgeExit::RedisError("Stream ended unexpectedly".to_string());
+                        }
+                        Err(_) => {
+                            // Timeout — loop to check receiver_count and shutdown
+                            continue;
+                        }
                     }
-                }
-                Ok(None) => {
-                    break BridgeExit::RedisError("Stream ended unexpectedly".to_string());
-                }
-                Err(_) => {
-                    // Timeout — loop to check receiver_count
-                    continue;
                 }
             }
         };
@@ -239,7 +278,7 @@ mod tests {
     /// Return a PubSubManager + the Redis URL, backed by the shared container.
     async fn make_manager() -> (PubSubManager, String) {
         let redis = crate::test_containers::shared_redis().await;
-        let mgr = PubSubManager::new(redis.url.clone(), 16);
+        let mgr = PubSubManager::new(redis.url.clone(), 16, CancellationToken::new());
         (mgr, redis.url.clone())
     }
 
@@ -295,7 +334,11 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_different_channels_create_separate_bridges() {
         // No real Redis needed: subscribe() always succeeds (bridge reconnects in bg).
-        let mgr = PubSubManager::new("redis://127.0.0.1:19998".to_string(), 16);
+        let mgr = PubSubManager::new(
+            "redis://127.0.0.1:19998".to_string(),
+            16,
+            CancellationToken::new(),
+        );
 
         let _rx1 = mgr
             .subscribe("test:pubsub:ch1")
@@ -313,14 +356,22 @@ mod tests {
     async fn test_subscribe_bad_redis_url_does_not_panic() {
         // A bad URL means the bridge background task will fail to connect,
         // but subscribe() itself must return Ok (bridge reconnects in the background).
-        let mgr = PubSubManager::new("redis://127.0.0.1:19996".to_string(), 16);
+        let mgr = PubSubManager::new(
+            "redis://127.0.0.1:19996".to_string(),
+            16,
+            CancellationToken::new(),
+        );
         let result = mgr.subscribe("test:bad").await;
         assert!(result.is_ok(), "subscribe should not panic on bad URL");
     }
 
     #[tokio::test]
     async fn test_active_channels_starts_at_zero() {
-        let mgr = PubSubManager::new("redis://127.0.0.1:19997".to_string(), 16);
+        let mgr = PubSubManager::new(
+            "redis://127.0.0.1:19997".to_string(),
+            16,
+            CancellationToken::new(),
+        );
         assert_eq!(mgr.active_channels(), 0);
     }
 
@@ -357,5 +408,58 @@ mod tests {
                 .expect("recv error");
             assert_eq!(msg, format!("msg-{i}"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_stops_message_forwarding() {
+        let token = CancellationToken::new();
+        let redis = crate::test_containers::shared_redis().await;
+        let mgr = PubSubManager::new(redis.url.clone(), 16, token.clone());
+        let channel = "test:pubsub:shutdown";
+
+        let mut rx = mgr.subscribe(channel).await.expect("subscribe");
+
+        // Give bridge time to connect
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Verify messages are delivered before shutdown
+        let client = redis::Client::open(redis.url.as_str()).expect("client open");
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connection");
+
+        let _: i64 = redis::cmd("PUBLISH")
+            .arg(channel)
+            .arg("before-shutdown")
+            .query_async(&mut conn)
+            .await
+            .expect("publish");
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("recv error");
+        assert_eq!(msg, "before-shutdown");
+
+        // Cancel shutdown token — bridge should exit within IDLE_CHECK_INTERVAL (2s)
+        token.cancel();
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Publish after shutdown — bridge is dead, message should NOT arrive
+        let _: i64 = redis::cmd("PUBLISH")
+            .arg(channel)
+            .arg("after-shutdown")
+            .query_async(&mut conn)
+            .await
+            .expect("publish");
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+
+        // Should timeout — no one is forwarding messages anymore
+        assert!(
+            result.is_err(),
+            "Message should NOT be forwarded after shutdown"
+        );
     }
 }
