@@ -30,7 +30,11 @@ social-api/
 ├── migrations/              # SQLx migrations
 ├── docker-compose.yml
 ├── Dockerfile               # Multi-stage (social-api)
-└── Dockerfile.mock          # Multi-stage (mock-services)
+├── Dockerfile.mock          # Multi-stage (mock-services)
+├── k6/                      # Load tests (k6)
+├── monitoring/              # Monitoring configs
+├── scripts/                 # Utility scripts
+└── docs/                    # Design docs and plans
 ```
 
 ### Data Flow
@@ -96,7 +100,9 @@ CREATE TABLE like_counts (
     content_type VARCHAR(50) NOT NULL,
     content_id   UUID NOT NULL,
     total_count  BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (content_type, content_id)
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (content_type, content_id),
+    CONSTRAINT chk_total_count_non_negative CHECK (total_count >= 0)
 );
 ```
 
@@ -151,9 +157,11 @@ For all external service calls (Content API, Profile API):
 - `social_api_http_request_duration_seconds{method, path}`
 - `social_api_cache_operations_total{operation, result}`
 - `social_api_external_calls_total{service, method, status}`
+- `social_api_external_call_duration_seconds{service, method}`
 - `social_api_circuit_breaker_state{service}`
 - `social_api_sse_connections_active`
 - `social_api_likes_total{content_type, operation}`
+- `social_api_db_pool_connections{pool, state}`
 
 ### Structured Logging
 
@@ -180,31 +188,39 @@ CONTENT_API_POST_URL=http://mock-services:8081
 
 ```bash
 # Unit tests (no infrastructure needed)
-cargo test --workspace
+cargo test --workspace --bins
+
+# HTTP tests (uses testcontainers, no manual setup)
+cargo test --workspace --test http_test
 
 # Integration tests (requires docker compose up)
 docker compose up -d
 cargo test --test integration_test -p social-api -- --ignored
+cargo test --test graceful_shutdown_test -p social-api -- --ignored
 ```
 
-**33 unit tests** covering:
-- Circuit breaker state transitions (10 tests: consecutive failures, failure rate window, half-open recovery)
-- TimeWindow parsing, duration, display, and type serialization (7 tests)
-- Error code -> HTTP status mapping and API error serialization (7 tests)
-- Cursor encode/decode roundtrip and invalid input handling (4 tests)
-- Path normalization for metrics (3 tests)
-- Config env-var parsing (2 tests)
+**146 unit tests** covering:
+- Like service business logic (23 tests)
+- Config env-var parsing and validation (19 tests)
+- Cache manager operations (14 tests)
+- Error code mapping and API error serialization (14 tests)
+- Circuit breaker state transitions, failure rate, half-open recovery (13 tests)
+- Like repository SQL operations (12 tests)
+- Rate limiting sliding window logic (8 tests)
+- Metrics path normalization and registration (8 tests)
+- TimeWindow parsing, duration, display, serialization (7 tests)
+- PubSub manager channel subscriptions (6 tests)
+- Leaderboard refresh task (5 tests)
+- Cursor encode/decode roundtrip and invalid input (4 tests)
+- Shutdown drain and signal handling (4 tests)
+- DB pool metrics emission (4 tests)
+- AppState construction (3 tests)
+- Profile client token validation (2 tests)
 
-**21 integration tests** covering:
-- Full like lifecycle
-- Idempotency (like + unlike)
-- Authentication and authorization
-- Content validation
-- Batch operations with size limits
-- Cursor pagination
-- Leaderboard with time windows
-- Metrics endpoint
-- Mock service validation
+**67 integration tests** covering:
+- HTTP endpoint tests (39 tests): health probes, auth, content validation, like/unlike, counts, statuses, batch operations, pagination, leaderboard, metrics, SSE, request-id propagation, rate limiting, multi-content-type support
+- Integration tests (24 tests): full lifecycle, idempotency, auth flows, batch limits, cursor pagination, leaderboard windows, mock service validation, concurrent race conditions, SSE events, rate limiting, circuit breaker behavior
+- Graceful shutdown tests (4 tests): drain behavior and signal handling
 
 ## Trade-offs
 
