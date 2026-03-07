@@ -56,7 +56,10 @@
               }
             ]
           },
-          "unit": "reqps"
+          "unit": "reqps",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -115,16 +118,15 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 1
-              },
-              {
                 "color": "red",
-                "value": 2
+                "value": 1
               }
             ]
           },
-          "unit": "percent"
+          "unit": "percent",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -192,7 +194,10 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "percent",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -224,7 +229,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "(sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval])) / sum(rate(social_api_cache_operations_total[$interval]))) * 100",
           "legendFormat": "HTTP",
           "refId": "A"
         },
@@ -238,7 +243,7 @@
           "refId": "B"
         }
       ],
-      "title": "p50 Latency",
+      "title": "Cache Hit Rate %",
       "type": "stat"
     },
     {
@@ -269,7 +274,10 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -301,7 +309,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "social_api:http_request_duration:p90",
           "legendFormat": "HTTP",
           "refId": "A"
         },
@@ -346,7 +354,10 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -378,7 +389,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "social_api:http_request_duration:p99",
           "legendFormat": "HTTP",
           "refId": "A"
         },
@@ -423,7 +434,10 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "graphMode": "area"
+          }
         },
         "overrides": []
       },
@@ -475,34 +489,21 @@
           },
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
-                  "color": "green",
-                  "index": 0,
-                  "text": "CLOSED"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
+                  "text": "Closed",
+                  "color": "green"
+                },
                 "1": {
-                  "color": "yellow",
-                  "index": 1,
-                  "text": "HALF-OPEN"
-                }
-              },
-              "type": "value"
-            },
-            {
-              "options": {
+                  "text": "Half-Open",
+                  "color": "yellow"
+                },
                 "2": {
-                  "color": "red",
-                  "index": 2,
-                  "text": "OPEN"
+                  "text": "Open",
+                  "color": "red"
                 }
-              },
-              "type": "value"
+              }
             }
           ],
           "thresholds": {
@@ -559,7 +560,7 @@
         }
       ],
       "title": "Circuit Breakers",
-      "type": "stat"
+      "type": "state-timeline"
     },
     {
       "datasource": {
@@ -658,7 +659,10 @@
               {
                 "id": "custom.lineStyle",
                 "value": {
-                  "dash": [10, 5],
+                  "dash": [
+                    10,
+                    5
+                  ],
                   "fill": "dash"
                 }
               }
@@ -697,7 +701,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "social_api:http_request_duration:p50",
           "legendFormat": "HTTP p50",
           "refId": "A"
         },
@@ -706,7 +710,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "social_api:http_request_duration:p90",
           "legendFormat": "HTTP p90",
           "refId": "B"
         },
@@ -715,7 +719,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
+          "expr": "social_api:http_request_duration:p99",
           "legendFormat": "HTTP p99",
           "refId": "C"
         },
@@ -1172,6 +1176,37 @@
           "type": "timeseries"
         }
       ]
+    },
+    {
+      "id": 72455,
+      "type": "bargauge",
+      "title": "Likes Activity (Total)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation, content_type) (rate(social_api_likes_total[$interval]))",
+          "format": "time_series",
+          "legendFormat": "{{operation}} - {{content_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
     },
     {
       "collapsed": true,
@@ -1655,7 +1690,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1e-9
             },
             "legend": {
               "show": true
@@ -2248,7 +2283,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1e-9
             },
             "legend": {
               "show": true
@@ -2960,7 +2995,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1e-9
             },
             "legend": {
               "show": true
@@ -3491,6 +3526,34 @@
           "type": "timeseries"
         }
       ]
+    },
+    {
+      "id": 73175,
+      "type": "timeseries",
+      "title": "DB Pool Connections",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "targets": [
+        {
+          "expr": "social_api_db_pool_connections",
+          "format": "time_series",
+          "legendFormat": "{{pool}} - {{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        }
+      }
     },
     {
       "collapsed": true,

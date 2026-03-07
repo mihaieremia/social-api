@@ -83,6 +83,35 @@ impl CacheManager {
         }
     }
 
+    /// Set multiple string values with TTL in a single Redis pipeline (SETEX per key).
+    /// Silently fails on Redis error. Used by batch_counts to cache misses in one round-trip.
+    pub async fn set_many(&self, entries: &[(&str, &str, u64)]) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "set_many", "result" => "error").increment(1);
+                tracing::warn!(error = %e, "Redis pool GET failed for set_many");
+                return;
+            }
+        };
+        let mut pipe = redis::pipe();
+        for (key, value, ttl) in entries {
+            pipe.cmd("SETEX").arg(*key).arg(*ttl).arg(*value).ignore();
+        }
+        match pipe.query_async::<()>(&mut *conn).await {
+            Ok(()) => {
+                counter!("social_api_cache_operations_total", "operation" => "set_many", "result" => "ok").increment(entries.len() as u64);
+            }
+            Err(e) => {
+                counter!("social_api_cache_operations_total", "operation" => "set_many", "result" => "error").increment(1);
+                tracing::warn!(error = %e, "Redis set_many pipeline failed");
+            }
+        }
+    }
+
     /// Delete a key. Silently fails on Redis error.
     /// Used only by integration tests (cache flush for cold-cache benchmarks).
     #[allow(dead_code)]

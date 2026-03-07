@@ -91,6 +91,10 @@ const CONTENT_IDS = {
 };
 
 const CONTENT_TYPES = Object.keys(CONTENT_IDS);
+const ALL_CONTENT_REFS = CONTENT_TYPES.flatMap((ct) =>
+  CONTENT_IDS[ct].map((cid) => ({ content_type: ct, content_id: cid })),
+);
+const HOTSPOT_TOKEN = TOKENS[0];
 
 // ---------------------------------------------------------------------------
 // Custom metrics
@@ -127,6 +131,18 @@ function randomBatchItems(n) {
   }
   return items;
 }
+
+function cycleItems(items, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const item = items[i % items.length];
+    out.push({ content_type: item.content_type, content_id: item.content_id });
+  }
+  return out;
+}
+
+const FIXED_BATCH_COUNTS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
+const FIXED_BATCH_STATUS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
@@ -376,6 +392,50 @@ const BREAKPOINT_SCENARIOS = {
   },
 };
 
+// --- dedicated batch endpoint stress tests ---
+
+const BATCH_HOTSPOT_SCENARIOS = {
+  batch_hotspot: {
+    executor: 'ramping-arrival-rate',
+    exec: 'batchHotspot',
+    startRate: rps(0.01),
+    timeUnit: '1s',
+    stages: [
+      { duration: '2m', target: rps(0.01) },
+      { duration: '2m', target: rps(0.025) },
+      { duration: '2m', target: rps(0.05) },
+      { duration: '2m', target: rps(0.075) },
+      { duration: '2m', target: rps(0.10) },
+      { duration: SUSTAIN_DURATION, target: rps(0.10) },
+      { duration: '2m', target: 0 },
+    ],
+    ...vusFor(rps(0.10)),
+    gracefulStop: '30s',
+    tags: { scenario: 'batch_hotspot' },
+  },
+};
+
+const BATCH_STATUS_SCENARIOS = {
+  batch_status: {
+    executor: 'ramping-arrival-rate',
+    exec: 'batchStatuses',
+    startRate: rps(0.01),
+    timeUnit: '1s',
+    stages: [
+      { duration: '2m', target: rps(0.01) },
+      { duration: '2m', target: rps(0.025) },
+      { duration: '2m', target: rps(0.05) },
+      { duration: '2m', target: rps(0.075) },
+      { duration: '2m', target: rps(0.10) },
+      { duration: SUSTAIN_DURATION, target: rps(0.10) },
+      { duration: '2m', target: 0 },
+    ],
+    ...vusFor(rps(0.10)),
+    gracefulStop: '30s',
+    tags: { scenario: 'batch_status' },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Scenario selector
 // ---------------------------------------------------------------------------
@@ -390,9 +450,13 @@ function buildScenarios() {
       return SOAK_SCENARIOS;
     case 'breakpoint':
       return BREAKPOINT_SCENARIOS;
+    case 'batch_hotspot':
+      return BATCH_HOTSPOT_SCENARIOS;
+    case 'batch_status':
+      return BATCH_STATUS_SCENARIOS;
     default:
       console.error(`Unknown scenario: ${SCENARIO}`);
-      console.error('Available: stress, spike, soak, breakpoint');
+      console.error('Available: stress, spike, soak, breakpoint, batch_hotspot, batch_status');
       return STRESS_SCENARIOS;
   }
 }
@@ -431,6 +495,16 @@ function buildThresholds() {
         // No strict thresholds — the point is finding where things break.
         // Just track that we don't immediately fall over.
         'http_req_failed{scenario:breakpoint_mixed}': ['rate<0.50'],
+      };
+    case 'batch_hotspot':
+      return {
+        'http_req_duration{scenario:batch_hotspot}': ['p(95)<300', 'p(99)<1000'],
+        'http_req_failed{scenario:batch_hotspot}': ['rate<0.05'],
+      };
+    case 'batch_status':
+      return {
+        'http_req_duration{scenario:batch_status}': ['p(95)<300', 'p(99)<1000'],
+        'http_req_failed{scenario:batch_status}': ['rate<0.05'],
       };
     default:
       return {};
@@ -503,6 +577,50 @@ export function batchSmall() {
 
   check(res, {
     'batch: status ok': (r) => r.status === 200 || r.status === 429,
+  });
+}
+
+export function batchHotspot() {
+  const url = `${BASE_URL}/v1/likes/batch/counts`;
+  const payload = JSON.stringify({ items: FIXED_BATCH_COUNTS_ITEMS });
+
+  const res = http.post(url, payload, {
+    headers: JSON_HEADERS,
+    tags: { name: 'POST_batch_counts_hotspot' },
+  });
+
+  batchLatency.add(res.timings.duration);
+
+  const ok = res.status === 200 || res.status === 429;
+  if (!ok) {
+    errorsByType.add(1, { type: 'batch_hotspot', status: String(res.status) });
+  }
+  degradedResponses.add(res.timings.duration > 300);
+
+  check(res, {
+    'batch_hotspot: status ok': (r) => r.status === 200 || r.status === 429,
+  });
+}
+
+export function batchStatuses() {
+  const url = `${BASE_URL}/v1/likes/batch/statuses`;
+  const payload = JSON.stringify({ items: FIXED_BATCH_STATUS_ITEMS });
+
+  const res = http.post(url, payload, {
+    headers: authHeaders(HOTSPOT_TOKEN),
+    tags: { name: 'POST_batch_statuses' },
+  });
+
+  batchLatency.add(res.timings.duration);
+
+  const ok = res.status === 200 || res.status === 429;
+  if (!ok) {
+    errorsByType.add(1, { type: 'batch_status', status: String(res.status) });
+  }
+  degradedResponses.add(res.timings.duration > 300);
+
+  check(res, {
+    'batch_status: status ok': (r) => r.status === 200 || r.status === 429,
   });
 }
 

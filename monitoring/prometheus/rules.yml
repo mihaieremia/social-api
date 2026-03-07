@@ -2,45 +2,87 @@ groups:
   - name: social_api_latency
     interval: 5s
     rules:
-      # Global HTTP latency quantiles
-      - record: social_api:http_request_duration:p50
+      # Global HTTP latency quantiles [5m]
+      - record: social_api:http_request_duration:p50:5m
         expr: histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
-      - record: social_api:http_request_duration:p90
+      - record: social_api:http_request_duration:p90:5m
         expr: histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
-      - record: social_api:http_request_duration:p99
+      - record: social_api:http_request_duration:p99:5m
         expr: histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[5m])) by (le))
 
-      # Per-endpoint HTTP latency quantiles
-      - record: social_api:http_request_duration_by_path:p50
-        expr: histogram_quantile(0.5, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[5m])))
-      - record: social_api:http_request_duration_by_path:p90
-        expr: histogram_quantile(0.9, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[5m])))
-      - record: social_api:http_request_duration_by_path:p99
-        expr: histogram_quantile(0.99, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[5m])))
+      # Global HTTP latency quantiles [1m]
+      - record: social_api:http_request_duration:p50
+        expr: histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[1m])) by (le))
+      - record: social_api:http_request_duration:p90
+        expr: histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[1m])) by (le))
+      - record: social_api:http_request_duration:p99
+        expr: histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[1m])) by (le))
 
-      # External call latency quantiles
+      # Per-endpoint HTTP latency quantiles [1m]
+      - record: social_api:http_request_duration_by_path:p50
+        expr: histogram_quantile(0.5, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[1m])))
+      - record: social_api:http_request_duration_by_path:p90
+        expr: histogram_quantile(0.9, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[1m])))
+      - record: social_api:http_request_duration_by_path:p99
+        expr: histogram_quantile(0.99, sum by (le, path) (rate(social_api_http_request_duration_seconds_bucket[1m])))
+
+      # External call latency quantiles [1m]
       - record: social_api:external_call_duration:p50
-        expr: histogram_quantile(0.5, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.5, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[1m])))
       - record: social_api:external_call_duration:p90
-        expr: histogram_quantile(0.9, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.9, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[1m])))
       - record: social_api:external_call_duration:p99
-        expr: histogram_quantile(0.99, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.99, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[1m])))
 
   - name: social_api_grpc_latency
     interval: 5s
     rules:
-      # Global gRPC latency quantiles
+      # Global gRPC latency quantiles [1m]
       - record: social_api:grpc_request_duration:p50
-        expr: histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+        expr: histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[1m])) by (le))
       - record: social_api:grpc_request_duration:p90
-        expr: histogram_quantile(0.9, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+        expr: histogram_quantile(0.9, sum(rate(social_api_grpc_request_duration_seconds_bucket[1m])) by (le))
       - record: social_api:grpc_request_duration:p99
-        expr: histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+        expr: histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[1m])) by (le))
 
-      # Per-method gRPC latency quantiles
+      # Per-method gRPC latency quantiles [1m]
       - record: social_api:grpc_request_duration_by_method:p50
-        expr: histogram_quantile(0.5, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.5, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[1m])))
       - record: social_api:grpc_request_duration_by_method:p90
-        expr: histogram_quantile(0.9, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.9, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[1m])))
       - record: social_api:grpc_request_duration_by_method:p99
-        expr: histogram_quantile(0.99, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
+        expr: histogram_quantile(0.99, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[1m])))
+
+  - name: social_api_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: >
+          ((sum(rate(social_api_http_requests_total{status=~"5.."}[1m])) or vector(0)) + 
+          (sum(rate(social_api_grpc_requests_total{code!="OK"}[1m])) or vector(0))) 
+          / 
+          ((sum(rate(social_api_http_requests_total[1m])) or vector(0)) + 
+          (sum(rate(social_api_grpc_requests_total[1m])) or vector(0))) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High Error Rate (>1%)"
+          description: "Global error rate has exceeded 1% for 1 minute."
+
+      - alert: CircuitBreakerTripped
+        expr: social_api_circuit_breaker_state == 2
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit Breaker Tripped"
+          description: "A circuit breaker is in the Open state."
+
+      - alert: CacheDegraded
+        expr: sum(rate(social_api_cache_operations_total{result="error"}[1m])) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache Errors Detected"
+          description: "Redis cache is returning errors, running in degraded mode."

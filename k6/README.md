@@ -12,8 +12,9 @@
 k6 run k6/load_test.js
 ```
 
-Scenarios run sequentially: read (60s) -> batch (60s) -> write (60s) -> mixed (120s).
-Total duration: ~6 minutes.
+Scenarios run sequentially: read (60s) -> batch counts (60s) -> write (60s) -> mixed (120s)
+-> batch statuses (60s) -> batch hot-spot counts (60s) -> batch duplicate counts (60s).
+Total duration: ~10 minutes.
 
 ## Run Individual Scenarios
 
@@ -23,6 +24,15 @@ k6 run -e K6_SCENARIO=read_path k6/load_test.js
 
 # Batch path only (1k rps target)
 k6 run -e K6_SCENARIO=batch_path k6/load_test.js
+
+# Batch statuses only (500 rps target)
+k6 run -e K6_SCENARIO=batch_status_path k6/load_test.js
+
+# Identical 100-item batch-count hot-spot (250 rps target)
+k6 run -e K6_SCENARIO=batch_hotspot_path k6/load_test.js
+
+# Duplicate-heavy 100-item batch-count path (250 rps target)
+k6 run -e K6_SCENARIO=batch_duplicate_path k6/load_test.js
 
 # Write path only (500 rps target)
 k6 run -e K6_SCENARIO=write_path k6/load_test.js
@@ -50,6 +60,9 @@ k6 run -e BASE_URL=http://your-host:9080 k6/load_test.js
 |------------|------------|------------|
 | read_path  | 10,000 rps | < 5ms      |
 | batch_path | 1,000 rps  | < 50ms     |
+| batch_status_path | 500 rps | < 75ms |
+| batch_hotspot_path | 250 rps | < 100ms |
+| batch_duplicate_path | 250 rps | < 100ms |
 | write_path | 500 rps    | < 100ms    |
 | mixed      | 2,000 rps  | < 100ms    |
 | All        | error rate | < 1%       |
@@ -69,10 +82,36 @@ The k6 checks treat HTTP 429 (rate limited) as a valid response, so the test
 will still pass even with aggressive rate limits — only latency thresholds will
 be evaluated on successful requests.
 
-## Baseline Results (2026-03-05)
+## Batch-Focused Coverage
+
+The suite now includes dedicated scenarios for the main batch-risk shapes:
+
+- `batch_path`: random 50-item batch counts at 1k rps
+- `batch_status_path`: authenticated 100-item batch statuses at 500 rps
+- `batch_hotspot_path`: identical 100-item batch counts from all VUs
+- `batch_duplicate_path`: duplicate-heavy 100-item batch counts (5 unique refs repeated)
+
+For longer ramp/sustain testing, use the dedicated stress targets:
+
+```bash
+make k6-stress-batch-hotspot
+make k6-stress-batch-status
+```
+
+Matching gRPC targets are also available:
+
+```bash
+make k6-grpc-batch
+make k6-grpc-batch-status
+make k6-grpc-batch-hotspot
+make k6-grpc-batch-duplicate
+```
+
+## Baseline Results (Legacy Core Suite, 2026-03-05)
 
 Environment: Docker Compose on macOS (Apple Silicon), single machine.
-All 5 thresholds passed. Zero failures across 929,991 requests.
+These numbers cover the original core suite (`read_path`, `batch_path`, `write_path`, `mixed`).
+The newer batch-focused scenarios were added after this baseline and should be re-run separately.
 
 ### Thresholds
 

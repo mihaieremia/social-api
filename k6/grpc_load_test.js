@@ -90,6 +90,23 @@ const CONTENT_IDS = {
 };
 
 const CONTENT_TYPES = Object.keys(CONTENT_IDS);
+const ALL_CONTENT_REFS = CONTENT_TYPES.flatMap((ct) =>
+  CONTENT_IDS[ct].map((cid) => ({ content_type: ct, content_id: cid })),
+);
+const HOTSPOT_TOKEN = TOKENS[0];
+
+function cycleItems(items, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const item = items[i % items.length];
+    out.push({ content_type: item.content_type, content_id: item.content_id });
+  }
+  return out;
+}
+
+const FIXED_BATCH_COUNTS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
+const FIXED_BATCH_STATUS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
+const DUPLICATE_HEAVY_BATCH_ITEMS = cycleItems(ALL_CONTENT_REFS.slice(0, 5), 100);
 
 // ---------------------------------------------------------------------------
 // gRPC Client — load protos at init time
@@ -128,7 +145,6 @@ function randomBatchItems(n) {
 function authParams(token) {
   return {
     metadata: { authorization: `Bearer ${token}` },
-    tags: {},
   };
 }
 
@@ -216,6 +232,45 @@ const ALL_SCENARIOS = {
     startTime: '210s',
     tags: { scenario: 'grpc_mixed' },
   },
+
+  grpc_batch_status: {
+    executor: 'constant-arrival-rate',
+    exec: 'grpcBatchStatuses',
+    rate: 500,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 20,
+    maxVUs: 40,
+    gracefulStop: '10s',
+    startTime: '340s',
+    tags: { scenario: 'grpc_batch_status' },
+  },
+
+  grpc_batch_hotspot: {
+    executor: 'constant-arrival-rate',
+    exec: 'grpcBatchHotspotCounts',
+    rate: 250,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 15,
+    maxVUs: 30,
+    gracefulStop: '10s',
+    startTime: '410s',
+    tags: { scenario: 'grpc_batch_hotspot' },
+  },
+
+  grpc_batch_duplicate: {
+    executor: 'constant-arrival-rate',
+    exec: 'grpcBatchDuplicateCounts',
+    rate: 250,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 15,
+    maxVUs: 30,
+    gracefulStop: '10s',
+    startTime: '480s',
+    tags: { scenario: 'grpc_batch_duplicate' },
+  },
 };
 
 // Parallel: all scenarios fire simultaneously
@@ -241,6 +296,17 @@ const PARALLEL_SCENARIOS = {
     maxVUs: 30,
     gracefulStop: '10s',
     tags: { scenario: 'parallel_grpc_batch' },
+  },
+  parallel_grpc_batch_hotspot: {
+    executor: 'constant-arrival-rate',
+    exec: 'grpcBatchHotspotCounts',
+    rate: 200,
+    timeUnit: '1s',
+    duration: '90s',
+    preAllocatedVUs: 15,
+    maxVUs: 30,
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_grpc_batch_hotspot' },
   },
   parallel_grpc_write: {
     executor: 'constant-arrival-rate',
@@ -291,6 +357,7 @@ function buildThresholds() {
     return {
       'grpc_req_duration{scenario:parallel_grpc_read}': [`p(99)<${15 * m}`],
       'grpc_req_duration{scenario:parallel_grpc_batch}': [`p(99)<${75 * m}`],
+      'grpc_req_duration{scenario:parallel_grpc_batch_hotspot}': [`p(99)<${100 * m}`],
       'grpc_req_duration{scenario:parallel_grpc_write}': [`p(99)<${150 * m}`],
     };
   }
@@ -302,6 +369,9 @@ function buildThresholds() {
   return {
     'grpc_req_duration{scenario:grpc_read}': [`p(99)<${10 * m}`],
     'grpc_req_duration{scenario:grpc_batch}': [`p(99)<${50 * m}`],
+    'grpc_req_duration{scenario:grpc_batch_status}': [`p(99)<${75 * m}`],
+    'grpc_req_duration{scenario:grpc_batch_hotspot}': [`p(99)<${100 * m}`],
+    'grpc_req_duration{scenario:grpc_batch_duplicate}': [`p(99)<${100 * m}`],
     'grpc_req_duration{scenario:grpc_write}': [`p(99)<${100 * m}`],
     'grpc_req_duration{scenario:grpc_mixed}': [`p(99)<${100 * m}`],
   };
@@ -405,6 +475,66 @@ export function grpcBatchCounts() {
     },
   });
 
+}
+
+export function grpcBatchStatuses() {
+  try { ensureConnected(); } catch (_) { return; }
+
+  const res = client.invoke(
+    'social.v1.LikeService/BatchStatuses',
+    { items: FIXED_BATCH_STATUS_ITEMS },
+    Object.assign({ tags: { name: 'gRPC_BatchStatuses' } }, authParams(HOTSPOT_TOKEN)),
+  );
+
+  if (!res) { handleConnError(); return; }
+
+  check(res, {
+    'grpc_batch_status: status ok': (r) => isOkOrRateLimited(r.status),
+    'grpc_batch_status: results count': (r) => {
+      if (r.status === 8) return true;
+      return r.message && r.message.results && r.message.results.length === 100;
+    },
+  });
+}
+
+export function grpcBatchHotspotCounts() {
+  try { ensureConnected(); } catch (_) { return; }
+
+  const res = client.invoke(
+    'social.v1.LikeService/BatchCounts',
+    { items: FIXED_BATCH_COUNTS_ITEMS },
+    { tags: { name: 'gRPC_BatchCountsHotspot' } },
+  );
+
+  if (!res) { handleConnError(); return; }
+
+  check(res, {
+    'grpc_batch_hotspot: status ok': (r) => isOkOrRateLimited(r.status),
+    'grpc_batch_hotspot: results count': (r) => {
+      if (r.status === 8) return true;
+      return r.message && r.message.results && r.message.results.length === 100;
+    },
+  });
+}
+
+export function grpcBatchDuplicateCounts() {
+  try { ensureConnected(); } catch (_) { return; }
+
+  const res = client.invoke(
+    'social.v1.LikeService/BatchCounts',
+    { items: DUPLICATE_HEAVY_BATCH_ITEMS },
+    { tags: { name: 'gRPC_BatchCountsDuplicate' } },
+  );
+
+  if (!res) { handleConnError(); return; }
+
+  check(res, {
+    'grpc_batch_duplicate: status ok': (r) => isOkOrRateLimited(r.status),
+    'grpc_batch_duplicate: results count': (r) => {
+      if (r.status === 8) return true;
+      return r.message && r.message.results && r.message.results.length === 100;
+    },
+  });
 }
 
 export function grpcWriteCycle() {

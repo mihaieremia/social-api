@@ -4,6 +4,7 @@
 //! mirroring the HTTP metrics middleware.
 
 use std::time::Instant;
+use tonic::Code;
 
 /// Record a completed gRPC request in Prometheus metrics.
 ///
@@ -25,6 +26,29 @@ pub fn record_grpc_request(method: &'static str, code: &'static str, start: Inst
     .record(latency);
 }
 
+/// Convert tonic status codes to stable Prometheus label values.
+pub fn grpc_code_label(code: Code) -> &'static str {
+    match code {
+        Code::Ok => "OK",
+        Code::Cancelled => "CANCELLED",
+        Code::Unknown => "UNKNOWN",
+        Code::InvalidArgument => "INVALID_ARGUMENT",
+        Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+        Code::NotFound => "NOT_FOUND",
+        Code::AlreadyExists => "ALREADY_EXISTS",
+        Code::PermissionDenied => "PERMISSION_DENIED",
+        Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+        Code::FailedPrecondition => "FAILED_PRECONDITION",
+        Code::Aborted => "ABORTED",
+        Code::OutOfRange => "OUT_OF_RANGE",
+        Code::Unimplemented => "UNIMPLEMENTED",
+        Code::Internal => "INTERNAL",
+        Code::Unavailable => "UNAVAILABLE",
+        Code::DataLoss => "DATA_LOSS",
+        Code::Unauthenticated => "UNAUTHENTICATED",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +64,15 @@ mod tests {
     fn record_grpc_request_with_error_code() {
         let start = Instant::now();
         record_grpc_request("social.v1.LikeService/Like", "UNAUTHENTICATED", start);
+    }
+
+    #[test]
+    fn grpc_code_label_matches_expected_prometheus_values() {
+        assert_eq!(grpc_code_label(Code::Ok), "OK");
+        assert_eq!(
+            grpc_code_label(Code::ResourceExhausted),
+            "RESOURCE_EXHAUSTED"
+        );
+        assert_eq!(grpc_code_label(Code::Unavailable), "UNAVAILABLE");
     }
 }

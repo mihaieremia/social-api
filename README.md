@@ -61,11 +61,17 @@ make coverage-full      # Full coverage including docker-compose integration
 Requires [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) (`brew install k6`).
 
 ```bash
-make k6-load            # Full sequential suite (~6 min)
+make k6-load            # Full sequential suite (~11 min)
 make k6-load-read       # Read path only (10k rps)
+make k6-load-batch      # Batch counts only (1k rps)
+make k6-load-batch-status   # Auth batch statuses only (500 rps)
+make k6-load-batch-hotspot  # Identical 100-item batch counts
+make k6-load-batch-duplicate # Duplicate-heavy 100-item batch counts
 make k6-load-write      # Write path only (500 rps)
 make k6-load-mixed      # Mixed 80/15/5 workload (2k rps)
 make k6-stress          # Ramp to TARGET_RPS, sustained
+make k6-stress-batch-hotspot # Stress the hot-spot batch-count path
+make k6-stress-batch-status  # Stress the auth batch-status path
 make k6-breakpoint      # Ramp until system breaks
 ```
 

@@ -146,7 +146,7 @@ fn extract_int(value: &redis::Value) -> Option<i64> {
 }
 
 /// Add rate limit headers to response.
-fn add_rate_limit_headers(response: &mut Response, result: &RateLimitResult) {
+pub fn add_rate_limit_headers(response: &mut Response, result: &RateLimitResult) {
     let remaining = (result.limit - result.current).max(0);
 
     let headers = response.headers_mut();
@@ -162,7 +162,7 @@ fn add_rate_limit_headers(response: &mut Response, result: &RateLimitResult) {
 }
 
 /// Build a 429 response with rate limit headers.
-fn rate_limited_response(result: &RateLimitResult) -> Response {
+pub fn rate_limited_response(result: &RateLimitResult) -> Response {
     let api_error = ApiError::new(ErrorCode::RateLimited, "Rate limit exceeded", "unknown");
     let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(api_error)).into_response();
 
@@ -173,40 +173,64 @@ fn rate_limited_response(result: &RateLimitResult) -> Response {
     response
 }
 
-/// Write rate limit middleware (per-user, applied to POST/DELETE).
-/// Uses `from_fn_with_state` to access AppState.
-pub async fn write_rate_limit(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let user_token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+/// Check per-user write rate limit. Called from handlers AFTER auth extraction.
+pub async fn check_user_write_limit(
+    cache: &CacheManager,
+    user_id: uuid::Uuid,
+    limit: u64,
+) -> RateLimitResult {
+    let key = format!("rl:user:write:{}", fnv1a_hash(&user_id.to_string()));
+    check_rate_limit_inner(cache, &key, limit, 60).await
+}
 
-    let key = format!("rl:w:{}", fnv1a_hash(user_token));
-    let limit = state.config().rate_limit_write_per_minute;
-    let result = check_rate_limit_inner(state.cache(), &key, limit, 60).await;
-
+/// Enforce per-user write rate limit for callers that only need allow/deny.
+pub async fn enforce_user_write_limit(
+    cache: &CacheManager,
+    user_id: uuid::Uuid,
+    limit: u64,
+) -> Result<(), shared::errors::AppError> {
+    let result = check_user_write_limit(cache, user_id, limit).await;
     if !result.allowed {
-        return rate_limited_response(&result);
+        return Err(shared::errors::AppError::RateLimited {
+            retry_after_secs: result.reset_secs,
+        });
     }
+    Ok(())
+}
 
-    let mut response = next.run(request).await;
-    add_rate_limit_headers(&mut response, &result);
-    response
+/// Check per-user read rate limit. Called from handlers AFTER auth extraction.
+pub async fn check_user_read_limit(
+    cache: &CacheManager,
+    user_id: uuid::Uuid,
+    limit: u64,
+) -> RateLimitResult {
+    let key = format!("rl:user:read:{}", fnv1a_hash(&user_id.to_string()));
+    check_rate_limit_inner(cache, &key, limit, 60).await
+}
+
+/// Enforce per-user read rate limit for callers that only need allow/deny.
+pub async fn enforce_user_read_limit(
+    cache: &CacheManager,
+    user_id: uuid::Uuid,
+    limit: u64,
+) -> Result<(), shared::errors::AppError> {
+    let result = check_user_read_limit(cache, user_id, limit).await;
+    if !result.allowed {
+        return Err(shared::errors::AppError::RateLimited {
+            retry_after_secs: result.reset_secs,
+        });
+    }
+    Ok(())
 }
 
 /// Extract the real client IP for rate limiting.
 ///
-/// Uses the RIGHTMOST value in X-Forwarded-For — the address appended by the
-/// last trusted proxy (load balancer). Assumes deployment behind a trusted
+/// Uses the LEFTMOST value in X-Forwarded-For — the original client address.
+/// Assumes deployment behind a trusted
 /// reverse proxy that sets this header. Falls back to X-Real-IP, then "unknown".
-fn extract_real_ip(header_value: &str) -> &str {
+pub(crate) fn extract_real_ip(header_value: &str) -> &str {
     header_value
-        .rsplit(',')
+        .split(',')
         .next()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -235,7 +259,7 @@ pub async fn read_rate_limit(
         extract_real_ip(raw).to_string()
     };
 
-    let key = format!("rl:r:{}", fnv1a_hash(&ip));
+    let key = format!("rl:ip:read:{}", fnv1a_hash(&ip));
     let limit = state.config().rate_limit_read_per_minute;
     let result = check_rate_limit_inner(state.cache(), &key, limit, 60).await;
 
@@ -269,10 +293,10 @@ mod tests {
     // --- Pure function tests (no infrastructure needed) ---
 
     #[test]
-    fn test_extract_rightmost_ip_from_forwarded_for() {
-        assert_eq!(extract_real_ip("1.1.1.1, 2.2.2.2, 10.0.0.1"), "10.0.0.1");
+    fn test_extract_leftmost_ip_from_forwarded_for() {
+        assert_eq!(extract_real_ip("1.1.1.1, 2.2.2.2, 10.0.0.1"), "1.1.1.1");
         assert_eq!(extract_real_ip("192.168.1.100"), "192.168.1.100");
-        assert_eq!(extract_real_ip("  1.2.3.4  ,  5.6.7.8  "), "5.6.7.8");
+        assert_eq!(extract_real_ip("  1.2.3.4  ,  5.6.7.8  "), "1.2.3.4");
     }
 
     #[test]

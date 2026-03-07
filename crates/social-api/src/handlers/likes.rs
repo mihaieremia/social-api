@@ -1,7 +1,7 @@
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
 };
 use shared::errors::AppError;
 use shared::types::*;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::errors::ApiErrorResponse;
 use crate::extractors::auth::AuthUser;
 use crate::extractors::content_path::ContentPath;
+use crate::middleware::rate_limit;
 use crate::state::AppState;
 
 /// Validate that a content_type string is registered in the config.
@@ -60,14 +61,27 @@ pub async fn like_content(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Json(body): Json<LikeRequest>,
-) -> Result<impl IntoResponse, ApiErrorResponse> {
+) -> Result<Response, ApiErrorResponse> {
+    // Per-user write rate limit (after auth — unauthenticated gets 401 not 429)
+    let rate_limit_result = rate_limit::check_user_write_limit(
+        state.cache(),
+        user.user_id,
+        state.config().rate_limit_write_per_minute,
+    )
+    .await;
+    if !rate_limit_result.allowed {
+        return Ok(rate_limit::rate_limited_response(&rate_limit_result));
+    }
+
     validate_content_type(&state, &body.content_type)?;
 
     let response = state
         .like_service()
         .like(user.user_id, &body.content_type, body.content_id)
         .await?;
-    Ok((StatusCode::CREATED, Json(response)))
+    let mut http_response = (StatusCode::CREATED, Json(response)).into_response();
+    rate_limit::add_rate_limit_headers(&mut http_response, &rate_limit_result);
+    Ok(http_response)
 }
 
 /// DELETE /v1/likes/:content_type/:content_id — Unlike content
@@ -91,12 +105,24 @@ pub async fn unlike_content(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     ContentPath(content_type, content_id): ContentPath,
-) -> Result<impl IntoResponse, ApiErrorResponse> {
+) -> Result<Response, ApiErrorResponse> {
+    let rate_limit_result = rate_limit::check_user_write_limit(
+        state.cache(),
+        user.user_id,
+        state.config().rate_limit_write_per_minute,
+    )
+    .await;
+    if !rate_limit_result.allowed {
+        return Ok(rate_limit::rate_limited_response(&rate_limit_result));
+    }
+
     let response = state
         .like_service()
         .unlike(user.user_id, &content_type, content_id)
         .await?;
-    Ok((StatusCode::OK, Json(response)))
+    let mut http_response = (StatusCode::OK, Json(response)).into_response();
+    rate_limit::add_rate_limit_headers(&mut http_response, &rate_limit_result);
+    Ok(http_response)
 }
 
 /// GET /v1/likes/:content_type/:content_id/count — Get like count (public)
@@ -144,12 +170,24 @@ pub async fn get_status(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     ContentPath(content_type, content_id): ContentPath,
-) -> Result<impl IntoResponse, ApiErrorResponse> {
+) -> Result<Response, ApiErrorResponse> {
+    let rate_limit_result = rate_limit::check_user_read_limit(
+        state.cache(),
+        user.user_id,
+        state.config().rate_limit_read_per_minute,
+    )
+    .await;
+    if !rate_limit_result.allowed {
+        return Ok(rate_limit::rate_limited_response(&rate_limit_result));
+    }
+
     let response = state
         .like_service()
         .get_status(user.user_id, &content_type, content_id)
         .await?;
-    Ok((StatusCode::OK, Json(response)))
+    let mut http_response = (StatusCode::OK, Json(response)).into_response();
+    rate_limit::add_rate_limit_headers(&mut http_response, &rate_limit_result);
+    Ok(http_response)
 }
 
 /// GET /v1/likes/user — Get user's liked items (auth, paginated)
@@ -173,7 +211,17 @@ pub async fn get_user_likes(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Query(params): Query<PaginationParams>,
-) -> Result<impl IntoResponse, ApiErrorResponse> {
+) -> Result<Response, ApiErrorResponse> {
+    let rate_limit_result = rate_limit::check_user_read_limit(
+        state.cache(),
+        user.user_id,
+        state.config().rate_limit_read_per_minute,
+    )
+    .await;
+    if !rate_limit_result.allowed {
+        return Ok(rate_limit::rate_limited_response(&rate_limit_result));
+    }
+
     // Validate optional content_type filter
     if let Some(ref ct) = params.content_type {
         validate_content_type(&state, ct)?;
@@ -189,7 +237,10 @@ pub async fn get_user_likes(
             limit,
         )
         .await?;
-    Ok((StatusCode::OK, Json(PaginatedUserLikes::from(response))))
+    let mut http_response =
+        (StatusCode::OK, Json(PaginatedUserLikes::from(response))).into_response();
+    rate_limit::add_rate_limit_headers(&mut http_response, &rate_limit_result);
+    Ok(http_response)
 }
 
 /// POST /v1/likes/batch/counts — Batch like counts (public)
@@ -230,14 +281,27 @@ pub async fn batch_statuses(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Json(body): Json<BatchRequest>,
-) -> Result<impl IntoResponse, ApiErrorResponse> {
+) -> Result<Response, ApiErrorResponse> {
+    let rate_limit_result = rate_limit::check_user_read_limit(
+        state.cache(),
+        user.user_id,
+        state.config().rate_limit_read_per_minute,
+    )
+    .await;
+    if !rate_limit_result.allowed {
+        return Ok(rate_limit::rate_limited_response(&rate_limit_result));
+    }
+
     validate_batch_content_types(&state, &body.items)?;
     let items = extract_batch_items(body);
     let results = state
         .like_service()
         .batch_statuses(user.user_id, &items)
         .await?;
-    Ok((StatusCode::OK, Json(BatchStatusesResponse { results })))
+    let mut http_response =
+        (StatusCode::OK, Json(BatchStatusesResponse { results })).into_response();
+    rate_limit::add_rate_limit_headers(&mut http_response, &rate_limit_result);
+    Ok(http_response)
 }
 
 /// Query params for leaderboard.

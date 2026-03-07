@@ -91,33 +91,52 @@ impl LikeService {
                 .await
                 .map_err(Self::db_err)?;
 
-        // Use the authoritative count from the write transaction to avoid
-        // races where a concurrent request reads a stale count from the reader.
-        let count = result.count;
-        self.write_count_to_cache(content_type, content_id, count)
-            .await;
-
-        if !result.already_existed {
-            self.publish_like_event(
-                LikeEvent::Liked {
-                    user_id,
+        match result {
+            like_repository::InsertLikeResult::Inserted { row, count } => {
+                self.write_count_to_cache(content_type, content_id, count)
+                    .await;
+                self.publish_like_event(
+                    LikeEvent::Liked {
+                        user_id,
+                        count,
+                        timestamp: row.created_at,
+                    },
+                    content_type,
+                    content_id,
+                )
+                .await;
+                Self::record_like_metric("like", content_type);
+                Ok(LikeActionResponse {
+                    liked: true,
+                    already_existed: Some(false),
+                    was_liked: None,
                     count,
-                    timestamp: result.row.created_at,
-                },
-                content_type,
-                content_id,
-            )
-            .await;
-            Self::record_like_metric("like", content_type);
+                    liked_at: Some(row.created_at),
+                })
+            }
+            like_repository::InsertLikeResult::AlreadyExisted { row, count } => {
+                self.write_count_to_cache(content_type, content_id, count)
+                    .await;
+                Ok(LikeActionResponse {
+                    liked: true,
+                    already_existed: Some(true),
+                    was_liked: None,
+                    count,
+                    liked_at: Some(row.created_at),
+                })
+            }
+            like_repository::InsertLikeResult::ConcurrentlyRemoved { count } => {
+                // Extremely rare: like was concurrently removed. Return stable
+                // idempotent response without fabricated timestamp.
+                Ok(LikeActionResponse {
+                    liked: true,
+                    already_existed: Some(true),
+                    was_liked: None,
+                    count,
+                    liked_at: None,
+                })
+            }
         }
-
-        Ok(LikeActionResponse {
-            liked: true,
-            already_existed: Some(result.already_existed),
-            was_liked: None,
-            count,
-            liked_at: Some(result.row.created_at),
-        })
     }
 
     /// Unlike content. Idempotent — unliking content not liked returns success.
@@ -185,8 +204,8 @@ impl LikeService {
 
     /// Internal count getter with cache-first strategy and stampede protection.
     ///
-    /// Uses a `watch::Sender` to coalesce concurrent cache misses into a single DB query.
-    /// Waiters are woken immediately when the fetcher completes.
+    /// Uses `DashMap::entry()` for atomic leader election — exactly one task
+    /// fetches from DB while concurrent tasks subscribe to the same `watch` channel.
     async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
         let cache_key = count_cache_key(content_type, content_id);
 
@@ -197,44 +216,58 @@ impl LikeService {
             return Ok(count);
         }
 
-        // Stampede protection: if another task is already fetching this key,
-        // subscribe to its result instead of firing a duplicate DB query.
-        if let Some(sender) = self.pending_fetches.get(&cache_key) {
-            let mut rx = sender.subscribe();
-            // Release the DashMap shard lock before awaiting — holding it across
-            // an await point would block other tasks from reading the same shard.
-            drop(sender);
-            rx.changed().await.ok();
-            if let Some(count) = *rx.borrow() {
-                return Ok(count);
-            }
-            // Sender was dropped (fetcher task failed) — fall through to DB directly.
+        // Atomic leader election via DashMap::entry().
+        // Occupied → another task is already fetching; subscribe as follower.
+        // Vacant   → we are the leader; register a watch channel and fetch from DB.
+        enum FetchRole {
+            Leader(watch::Sender<Option<i64>>),
+            Follower(watch::Receiver<Option<i64>>),
         }
 
-        // We are the designated fetcher. Register a channel so concurrent
-        // waiters can subscribe to our result.
-        let (tx, _rx) = watch::channel(None::<i64>);
-        self.pending_fetches.insert(cache_key.clone(), tx.clone());
-
-        let result = like_repository::get_count(&self.db.reader, content_type, content_id).await;
-
-        // Always clean up the DashMap entry — on success AND failure.
-        // Without this, a failed fetch leaves a stale entry with a dead sender,
-        // wasting memory until overwritten by a future insert().
-        match result {
-            Ok(count) => {
-                // Wake all waiters immediately with the fetched count.
-                let _ = tx.send(Some(count));
-                self.pending_fetches.remove(&cache_key);
-                self.write_count_to_cache(content_type, content_id, count)
-                    .await;
-                Ok(count)
+        let role = match self.pending_fetches.entry(cache_key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                let rx = entry.get().subscribe();
+                FetchRole::Follower(rx)
             }
-            Err(e) => {
-                // Clean up before propagating — waiters see the sender drop
-                // and fall back to DB directly.
-                self.pending_fetches.remove(&cache_key);
-                Err(Self::db_err(e))
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let (tx, _rx) = watch::channel(None::<i64>);
+                entry.insert(tx.clone());
+                FetchRole::Leader(tx)
+            }
+        };
+
+        match role {
+            FetchRole::Follower(mut rx) => {
+                // Await the leader's result — no DB query needed.
+                rx.changed().await.ok();
+                if let Some(count) = *rx.borrow() {
+                    return Ok(count);
+                }
+                // Leader failed — fall through to a direct DB read.
+                like_repository::get_count(&self.db.reader, content_type, content_id)
+                    .await
+                    .map_err(Self::db_err)
+            }
+            FetchRole::Leader(tx) => {
+                let result =
+                    like_repository::get_count(&self.db.reader, content_type, content_id).await;
+
+                // Always clean up the DashMap entry — on success AND failure.
+                match result {
+                    Ok(count) => {
+                        let _ = tx.send(Some(count));
+                        self.pending_fetches.remove(&cache_key);
+                        self.write_count_to_cache(content_type, content_id, count)
+                            .await;
+                        Ok(count)
+                    }
+                    Err(e) => {
+                        // Drop sender first so followers see the close,
+                        // then remove the entry.
+                        self.pending_fetches.remove(&cache_key);
+                        Err(Self::db_err(e))
+                    }
+                }
             }
         }
     }
@@ -317,6 +350,11 @@ impl LikeService {
     }
 
     /// Batch get like counts.
+    ///
+    /// 1. MGET all keys from Redis.
+    /// 2. Deduplicate cache misses — multiple request items for the same key share one fetch.
+    /// 3. Fetch all unique misses in a single batched SQL query.
+    /// 4. Pipeline-SETEX all fetched values back into Redis.
     pub async fn batch_counts(
         &self,
         items: &[(String, Uuid)],
@@ -337,7 +375,9 @@ impl LikeService {
         let cached_values = self.cache.mget(&cache_keys).await;
 
         let mut results = Vec::with_capacity(items.len());
-        let mut missing_indices = Vec::with_capacity(items.len());
+        // Dedup: map unique cache_key → (first missing position, list of all positions)
+        let mut missing_map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
 
         for (i, (ct, cid)) in items.iter().enumerate() {
             if let Some(Some(val)) = cached_values.get(i)
@@ -350,7 +390,11 @@ impl LikeService {
                 });
                 continue;
             }
-            missing_indices.push(i);
+            // Track position for filling later
+            missing_map
+                .entry(cache_keys[i].clone())
+                .or_default()
+                .push(i);
             results.push(BatchCountResult {
                 content_type: ct.clone(),
                 content_id: *cid,
@@ -358,26 +402,114 @@ impl LikeService {
             });
         }
 
-        // Fetch missing via get_count_inner, which has watch-channel stampede
-        // coalescing — concurrent misses for the same key share one DB query.
-        if !missing_indices.is_empty() {
-            let fetch_futures: Vec<_> = missing_indices
-                .iter()
-                .map(|&i| {
-                    let (ct, cid) = &items[i];
-                    self.get_count_inner(ct, *cid)
-                })
-                .collect();
+        if !missing_map.is_empty() {
+            // Single-flight coalescing: for each unique missing key, atomically
+            // elect a leader via DashMap::entry(). Leaders fetch from DB; followers
+            // subscribe and await the result.
+            let mut to_fetch: Vec<(String, Uuid)> = Vec::new(); // keys this request must fetch
+            let mut leader_keys: Vec<String> = Vec::new(); // cache keys we are leader for
+            let mut follower_rxs: Vec<(String, watch::Receiver<Option<i64>>)> = Vec::new();
 
-            let fetched_counts = futures::future::join_all(fetch_futures).await;
-
-            for (fetch_result, &i) in fetched_counts.into_iter().zip(missing_indices.iter()) {
-                match fetch_result {
-                    Ok(count) => results[i].count = count,
-                    Err(e) => return Err(e),
+            for cache_key in missing_map.keys() {
+                match self.pending_fetches.entry(cache_key.clone()) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => {
+                        let rx = entry.get().subscribe();
+                        follower_rxs.push((cache_key.clone(), rx));
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        let (tx, _rx) = watch::channel(None::<i64>);
+                        entry.insert(tx);
+                        let first_pos = missing_map[cache_key][0];
+                        to_fetch.push(items[first_pos].clone());
+                        leader_keys.push(cache_key.clone());
+                    }
                 }
             }
-            // get_count_inner already populates individual cache keys — no separate batch set needed.
+
+            // Leader path: batch-fetch all keys we own from DB
+            if !to_fetch.is_empty() {
+                let db_result = like_repository::batch_get_counts(&self.db.reader, &to_fetch).await;
+
+                match db_result {
+                    Ok(db_rows) => {
+                        let count_map: std::collections::HashMap<(String, Uuid), i64> = db_rows
+                            .into_iter()
+                            .map(|(ct, cid, count)| ((ct, cid), count))
+                            .collect();
+
+                        let ttl = self.config.cache_ttl_like_counts_secs;
+                        let mut cache_entries: Vec<(String, String)> =
+                            Vec::with_capacity(leader_keys.len());
+
+                        for cache_key in &leader_keys {
+                            let positions = &missing_map[cache_key];
+                            let first_pos = positions[0];
+                            let key = &items[first_pos];
+                            let count = count_map.get(key).copied().unwrap_or(0);
+
+                            // Fill result positions
+                            for &pos in positions {
+                                results[pos].count = count;
+                            }
+
+                            // Notify followers via watch channel
+                            if let Some((_, tx)) = self.pending_fetches.remove(cache_key) {
+                                let _ = tx.send(Some(count));
+                            }
+
+                            cache_entries.push((cache_key.clone(), count.to_string()));
+                        }
+
+                        // Pipeline SETEX all fetched values in one Redis round-trip
+                        let set_entries: Vec<(&str, &str, u64)> = cache_entries
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str(), ttl))
+                            .collect();
+                        self.cache.set_many(&set_entries).await;
+                    }
+                    Err(e) => {
+                        // Clean up all leader entries so followers see the sender drop
+                        for cache_key in &leader_keys {
+                            self.pending_fetches.remove(cache_key);
+                        }
+                        return Err(Self::db_err(e));
+                    }
+                }
+            }
+
+            // Follower path: await results from the leader's fetch
+            for (cache_key, mut rx) in follower_rxs {
+                let changed = rx.changed().await.is_ok();
+                let count = if changed {
+                    rx.borrow().as_ref().copied()
+                } else {
+                    None
+                };
+
+                let count = if let Some(count) = count {
+                    count
+                } else if let Some(positions) = missing_map.get(&cache_key) {
+                    // Leader failed or dropped before publishing. Mirror
+                    // get_count_inner() by falling back to a direct DB read.
+                    let first_pos = positions[0];
+                    let (content_type, content_id) = &items[first_pos];
+                    let count =
+                        like_repository::get_count(&self.db.reader, content_type, *content_id)
+                            .await
+                            .map_err(Self::db_err)?;
+                    self.write_count_to_cache(content_type, *content_id, count)
+                        .await;
+                    count
+                } else {
+                    continue;
+                };
+
+                if let Some(positions) = missing_map.get(&cache_key) {
+                    for &pos in positions {
+                        results[pos].count = count;
+                    }
+                }
+            }
         }
 
         Ok(results)

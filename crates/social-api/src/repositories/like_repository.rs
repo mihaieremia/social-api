@@ -14,14 +14,15 @@ pub struct LikeRow {
 }
 
 /// Result of an insert_like operation.
-/// Contains the like row, whether it already existed, and the authoritative
-/// count from the `like_counts` table (read within the same transaction).
-pub struct InsertLikeResult {
-    pub row: LikeRow,
-    pub already_existed: bool,
-    /// Authoritative total_count from `like_counts`, read inside the write
-    /// transaction. Safe to use as the cache value — no read-replica lag.
-    pub count: i64,
+/// Uses an enum to avoid fabricating synthetic timestamps for edge cases.
+pub enum InsertLikeResult {
+    /// New like was inserted. Contains the row and authoritative count.
+    Inserted { row: LikeRow, count: i64 },
+    /// Like already existed. Contains the existing row and authoritative count.
+    AlreadyExisted { row: LikeRow, count: i64 },
+    /// Extremely rare: INSERT saw a conflict but the row was concurrently deleted
+    /// before the follow-up SELECT. Returns only the authoritative count (0).
+    ConcurrentlyRemoved { count: i64 },
 }
 
 /// Insert a like. Returns the row, existence flag, and authoritative count.
@@ -67,9 +68,8 @@ pub async fn insert_like(
             .await?;
 
             tx.commit().await?;
-            Ok(InsertLikeResult {
+            Ok(InsertLikeResult::Inserted {
                 row: like_row,
-                already_existed: false,
                 count,
             })
         }
@@ -96,31 +96,18 @@ pub async fn insert_like(
             tx.commit().await?;
 
             match existing {
-                Some((id, ct, cid, created_at, count)) => Ok(InsertLikeResult {
+                Some((id, ct, cid, created_at, count)) => Ok(InsertLikeResult::AlreadyExisted {
                     row: LikeRow {
                         id,
                         content_type: ct,
                         content_id: cid,
                         created_at,
                     },
-                    already_existed: true,
                     count,
                 }),
                 None => {
-                    // Row was deleted by a concurrent unlike between our INSERT
-                    // ON CONFLICT check and this SELECT (within the same tx,
-                    // so this is an extremely narrow window). Return a no-op
-                    // "already existed" response with count 0.
-                    Ok(InsertLikeResult {
-                        row: LikeRow {
-                            id: 0,
-                            content_type: content_type.to_string(),
-                            content_id,
-                            created_at: chrono::Utc::now(),
-                        },
-                        already_existed: true,
-                        count: 0,
-                    })
+                    // Row was concurrently deleted — no fake timestamp.
+                    Ok(InsertLikeResult::ConcurrentlyRemoved { count: 0 })
                 }
             }
         }
@@ -201,6 +188,42 @@ pub async fn delete_like(
             count,
         })
     }
+}
+
+/// Batch get like counts for multiple content items in a single query.
+/// Uses unnest + LEFT JOIN like_counts — one round-trip for all items.
+pub async fn batch_get_counts(
+    pool: &PgPool,
+    items: &[(String, Uuid)],
+) -> Result<Vec<(String, Uuid, i64)>, sqlx::Error> {
+    if items.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut content_types = Vec::with_capacity(items.len());
+    let mut content_ids = Vec::with_capacity(items.len());
+    for (ct, cid) in items {
+        content_types.push(ct.as_str());
+        content_ids.push(*cid);
+    }
+
+    let rows: Vec<(String, Uuid, i64)> = sqlx::query_as(
+        r#"
+        SELECT req.content_type,
+               req.content_id,
+               COALESCE(lc.total_count, 0) AS total_count
+        FROM unnest($1::text[], $2::uuid[]) AS req(content_type, content_id)
+        LEFT JOIN like_counts lc
+            ON lc.content_type = req.content_type
+           AND lc.content_id = req.content_id
+        "#,
+    )
+    .bind(&content_types)
+    .bind(&content_ids)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
 }
 
 /// Get the like count for a content item from the like_counts table.
@@ -379,10 +402,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.already_existed);
-        assert_eq!(result.row.content_type, "post");
-        assert_eq!(result.row.content_id, content_id);
-        assert_eq!(result.count, 1);
+        match result {
+            InsertLikeResult::Inserted { row, count } => {
+                assert_eq!(row.content_type, "post");
+                assert_eq!(row.content_id, content_id);
+                assert_eq!(count, 1);
+            }
+            _ => panic!("expected Inserted variant"),
+        }
     }
 
     #[tokio::test]
@@ -399,8 +426,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.already_existed,
-            "second insert must report already_existed=true"
+            matches!(result, InsertLikeResult::AlreadyExisted { .. }),
+            "second insert must report AlreadyExisted"
         );
     }
 
@@ -576,8 +603,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!first.already_existed);
-        assert!(second.already_existed);
+        assert!(matches!(first, InsertLikeResult::Inserted { .. }));
+        assert!(matches!(second, InsertLikeResult::AlreadyExisted { .. }));
 
         let count = get_count(&pool, "post", content_id).await.unwrap();
         assert_eq!(count, 1, "duplicate like must not increment count");

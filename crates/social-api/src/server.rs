@@ -125,36 +125,24 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
         .route("/metrics", get(handlers::metrics_handler::metrics))
         .with_state(metrics_handle);
 
-    // Write routes (POST/DELETE) — per-user write rate limit
+    // Write routes (POST/DELETE) — per-user write rate limit enforced in handlers
+    // (after auth extraction, so unauthenticated requests get 401 not 429)
     let write_routes = Router::new()
         .route("/v1/likes", post(handlers::likes::like_content))
         .route(
             "/v1/likes/{content_type}/{content_id}",
             delete(handlers::likes::unlike_content),
-        )
-        .layer(axum_middleware::from_fn_with_state(
-            state.clone(),
-            middleware::rate_limit::write_rate_limit,
-        ));
+        );
 
-    // Read routes (GET + batch POST) — per-IP read rate limit
-    let read_routes = Router::new()
+    // Public read routes — per-IP read rate limit via middleware
+    let public_read_routes = Router::new()
         .route(
             "/v1/likes/{content_type}/{content_id}/count",
             get(handlers::likes::get_count),
         )
         .route(
-            "/v1/likes/{content_type}/{content_id}/status",
-            get(handlers::likes::get_status),
-        )
-        .route("/v1/likes/user", get(handlers::likes::get_user_likes))
-        .route(
             "/v1/likes/batch/counts",
             post(handlers::likes::batch_counts),
-        )
-        .route(
-            "/v1/likes/batch/statuses",
-            post(handlers::likes::batch_statuses),
         )
         .route("/v1/likes/top", get(handlers::likes::get_leaderboard))
         .route("/v1/likes/stream", get(handlers::stream::like_stream))
@@ -162,6 +150,19 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
             state.clone(),
             middleware::rate_limit::read_rate_limit,
         ));
+
+    // Authenticated read routes — per-user read rate limit enforced in handlers
+    // (after auth extraction, so users behind shared IPs aren't collapsed)
+    let authed_read_routes = Router::new()
+        .route(
+            "/v1/likes/{content_type}/{content_id}/status",
+            get(handlers::likes::get_status),
+        )
+        .route("/v1/likes/user", get(handlers::likes::get_user_likes))
+        .route(
+            "/v1/likes/batch/statuses",
+            post(handlers::likes::batch_statuses),
+        );
 
     // Merge write + read routes with shared state and global middleware
     // Layer order (last added = outermost = runs first):
@@ -172,7 +173,8 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
     // inject_request_id records request_id into the span; AuthUser extractor records user_id.
     let api_routes = Router::new()
         .merge(write_routes)
-        .merge(read_routes)
+        .merge(public_read_routes)
+        .merge(authed_read_routes)
         .with_state(state.clone())
         .layer(axum_middleware::from_fn(middleware::metrics::track_metrics))
         .layer(axum_middleware::from_fn(

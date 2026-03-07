@@ -84,6 +84,23 @@ const CONTENT_IDS = {
 };
 
 const CONTENT_TYPES = Object.keys(CONTENT_IDS);
+const ALL_CONTENT_REFS = CONTENT_TYPES.flatMap((ct) =>
+  CONTENT_IDS[ct].map((cid) => ({ content_type: ct, content_id: cid })),
+);
+const HOTSPOT_TOKEN = TOKENS[0];
+
+function cycleItems(items, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const item = items[i % items.length];
+    out.push({ content_type: item.content_type, content_id: item.content_id });
+  }
+  return out;
+}
+
+const FIXED_BATCH_COUNTS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
+const FIXED_BATCH_STATUS_ITEMS = cycleItems(ALL_CONTENT_REFS, 100);
+const DUPLICATE_HEAVY_BATCH_ITEMS = cycleItems(ALL_CONTENT_REFS.slice(0, 5), 100);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,6 +198,48 @@ const ALL_SCENARIOS = {
     startTime: '210s',
     tags: { scenario: 'mixed' },
   },
+
+  // Isolated: 500 rps auth batch statuses with max-size payloads
+  batch_status_path: {
+    executor: 'constant-arrival-rate',
+    exec: 'batchStatuses',
+    rate: 500,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 50,
+    maxVUs: 100,
+    gracefulStop: '10s',
+    startTime: '340s',
+    tags: { scenario: 'batch_status_path' },
+  },
+
+  // Isolated: 250 rps identical 100-item batch counts to pressure cold/hot-spot behavior
+  batch_hotspot_path: {
+    executor: 'constant-arrival-rate',
+    exec: 'batchHotspotCounts',
+    rate: 250,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 40,
+    maxVUs: 80,
+    gracefulStop: '10s',
+    startTime: '410s',
+    tags: { scenario: 'batch_hotspot_path' },
+  },
+
+  // Isolated: 250 rps duplicate-heavy 100-item batch counts
+  batch_duplicate_path: {
+    executor: 'constant-arrival-rate',
+    exec: 'batchDuplicateCounts',
+    rate: 250,
+    timeUnit: '1s',
+    duration: '60s',
+    preAllocatedVUs: 40,
+    maxVUs: 80,
+    gracefulStop: '10s',
+    startTime: '480s',
+    tags: { scenario: 'batch_duplicate_path' },
+  },
 };
 
 // --- Parallel mode: all scenarios fire simultaneously ---
@@ -211,6 +270,19 @@ const PARALLEL_SCENARIOS = {
     maxVUs: 100,
     gracefulStop: '10s',
     tags: { scenario: 'parallel_batch' },
+  },
+
+  // Hot-spot batch: identical 100-item payload from many VUs at once
+  parallel_batch_hotspot: {
+    executor: 'constant-arrival-rate',
+    exec: 'batchHotspotCounts',
+    rate: 200,
+    timeUnit: '1s',
+    duration: '90s',
+    preAllocatedVUs: 40,
+    maxVUs: 80,
+    gracefulStop: '10s',
+    tags: { scenario: 'parallel_batch_hotspot' },
   },
 
   // Writes: 300 rps (like/unlike cycling)
@@ -306,10 +378,12 @@ function buildThresholds() {
     return {
       'http_req_duration{scenario:parallel_read}': ['p(99)<15'],
       'http_req_duration{scenario:parallel_batch}': ['p(99)<75'],
+      'http_req_duration{scenario:parallel_batch_hotspot}': ['p(99)<100'],
       'http_req_duration{scenario:parallel_write}': ['p(99)<150'],
       // Exclude SSE from error rate — timeouts are expected for streaming
       'http_req_failed{scenario:parallel_read}': ['rate<0.01'],
       'http_req_failed{scenario:parallel_batch}': ['rate<0.01'],
+      'http_req_failed{scenario:parallel_batch_hotspot}': ['rate<0.01'],
       'http_req_failed{scenario:parallel_write}': ['rate<0.01'],
     };
   }
@@ -321,6 +395,9 @@ function buildThresholds() {
   return {
     'http_req_duration{scenario:read_path}': ['p(99)<5'],
     'http_req_duration{scenario:batch_path}': ['p(99)<50'],
+    'http_req_duration{scenario:batch_status_path}': ['p(99)<75'],
+    'http_req_duration{scenario:batch_hotspot_path}': ['p(99)<100'],
+    'http_req_duration{scenario:batch_duplicate_path}': ['p(99)<100'],
     'http_req_duration{scenario:write_path}': ['p(99)<100'],
     'http_req_duration{scenario:mixed}': ['p(99)<100'],
     http_req_failed: ['rate<0.01'],
@@ -359,6 +436,7 @@ export function readCount() {
 // Batch: POST /v1/likes/batch/counts with 50 items
 export function batchCounts() {
   const items = randomBatchItems(50);
+  const expectedLength = 50;
   const url = `${BASE_URL}/v1/likes/batch/counts`;
   const payload = JSON.stringify({ items });
 
@@ -372,7 +450,77 @@ export function batchCounts() {
     'batch: results length': (r) => {
       if (r.status === 429) return true;
       try {
-        return JSON.parse(r.body).results.length === 50;
+        return JSON.parse(r.body).results.length === expectedLength;
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+}
+
+// Batch statuses: POST /v1/likes/batch/statuses with 100 items
+export function batchStatuses() {
+  const items = FIXED_BATCH_STATUS_ITEMS;
+  const url = `${BASE_URL}/v1/likes/batch/statuses`;
+  const payload = JSON.stringify({ items });
+
+  const res = http.post(url, payload, {
+    headers: authHeaders(HOTSPOT_TOKEN),
+    tags: { name: 'POST_batch_statuses' },
+  });
+
+  check(res, {
+    'batch-statuses: status ok': (r) => r.status === 200 || r.status === 429,
+    'batch-statuses: results length': (r) => {
+      if (r.status === 429) return true;
+      try {
+        return JSON.parse(r.body).results.length === 100;
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+}
+
+// Hot-spot batch counts: identical 100-item payload from all VUs
+export function batchHotspotCounts() {
+  const url = `${BASE_URL}/v1/likes/batch/counts`;
+  const payload = JSON.stringify({ items: FIXED_BATCH_COUNTS_ITEMS });
+
+  const res = http.post(url, payload, {
+    headers: JSON_HEADERS,
+    tags: { name: 'POST_batch_counts_hotspot' },
+  });
+
+  check(res, {
+    'batch-hotspot: status ok': (r) => r.status === 200 || r.status === 429,
+    'batch-hotspot: results length': (r) => {
+      if (r.status === 429) return true;
+      try {
+        return JSON.parse(r.body).results.length === 100;
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+}
+
+// Duplicate-heavy batch counts: 100 items built from only 5 unique refs
+export function batchDuplicateCounts() {
+  const url = `${BASE_URL}/v1/likes/batch/counts`;
+  const payload = JSON.stringify({ items: DUPLICATE_HEAVY_BATCH_ITEMS });
+
+  const res = http.post(url, payload, {
+    headers: JSON_HEADERS,
+    tags: { name: 'POST_batch_counts_duplicate' },
+  });
+
+  check(res, {
+    'batch-duplicate: status ok': (r) => r.status === 200 || r.status === 429,
+    'batch-duplicate: results length': (r) => {
+      if (r.status === 429) return true;
+      try {
+        return JSON.parse(r.body).results.length === 100;
       } catch (_) {
         return false;
       }

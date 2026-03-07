@@ -130,8 +130,17 @@ k6-load: ## Run the full sequential load suite (all scenarios in order)
 k6-load-read: ## Load: isolated read path (10k rps, 60s)
 	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=read_path k6/load_test.js
 
-k6-load-batch: ## Load: isolated batch counts (500 rps, 60s)
+k6-load-batch: ## Load: isolated batch counts (1k rps, 60s)
 	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=batch_path k6/load_test.js
+
+k6-load-batch-status: ## Load: isolated auth batch statuses (500 rps, 60s)
+	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=batch_status_path k6/load_test.js
+
+k6-load-batch-hotspot: ## Load: identical 100-item batch counts hot-spot (250 rps, 60s)
+	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=batch_hotspot_path k6/load_test.js
+
+k6-load-batch-duplicate: ## Load: duplicate-heavy 100-item batch counts (250 rps, 60s)
+	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=batch_duplicate_path k6/load_test.js
 
 k6-load-write: ## Load: isolated write path like/unlike (500 rps, 60s)
 	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=write_path k6/load_test.js
@@ -157,6 +166,15 @@ k6-grpc-read: ## gRPC load: isolated read path (10k rps, 60s)
 
 k6-grpc-batch: ## gRPC load: isolated batch counts (1k rps, 60s)
 	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_batch k6/grpc_load_test.js
+
+k6-grpc-batch-status: ## gRPC load: isolated auth batch statuses (500 rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_batch_status k6/grpc_load_test.js
+
+k6-grpc-batch-hotspot: ## gRPC load: identical 100-item batch counts hot-spot (250 rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_batch_hotspot k6/grpc_load_test.js
+
+k6-grpc-batch-duplicate: ## gRPC load: duplicate-heavy 100-item batch counts (250 rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_batch_duplicate k6/grpc_load_test.js
 
 k6-grpc-write: ## gRPC load: isolated write path like/unlike (500 rps, 60s)
 	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_write k6/grpc_load_test.js
@@ -214,6 +232,22 @@ k6-breakpoint: ## Breakpoint: ramp until the system breaks (find capacity ceilin
 	  -e BASE_URL=$(BASE_URL) \
 	  -e K6_SCENARIO=breakpoint \
 	  -e STRESS_TARGET_RPS=$(TARGET_RPS) \
+	  k6/stress_test.js
+
+k6-stress-batch-hotspot: ## Stress: identical 100-item batch counts hot-spot ramp
+	k6 run \
+	  -e BASE_URL=$(BASE_URL) \
+	  -e K6_SCENARIO=batch_hotspot \
+	  -e STRESS_TARGET_RPS=$(TARGET_RPS) \
+	  -e STRESS_DURATION=$(STRESS_DURATION) \
+	  k6/stress_test.js
+
+k6-stress-batch-status: ## Stress: auth batch statuses ramp with max-size payloads
+	k6 run \
+	  -e BASE_URL=$(BASE_URL) \
+	  -e K6_SCENARIO=batch_status \
+	  -e STRESS_TARGET_RPS=$(TARGET_RPS) \
+	  -e STRESS_DURATION=$(STRESS_DURATION) \
 	  k6/stress_test.js
 
 # ---------------------------------------------------------------------------

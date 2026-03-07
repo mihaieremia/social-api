@@ -28,9 +28,9 @@ pub async fn check_grpc_rate_limit(
     read_limit: u64,
 ) -> Result<(), tonic::Status> {
     let (prefix, limit) = if is_write {
-        ("rl:w", write_limit)
+        ("rl:user:write", write_limit)
     } else {
-        ("rl:r", read_limit)
+        ("rl:ip:read", read_limit)
     };
     let key = format!("{prefix}:{}", fnv1a_hash(identifier));
     let result = check_rate_limit_inner(cache, &key, limit, 60).await;
@@ -52,15 +52,15 @@ mod tests {
     fn write_key_uses_write_prefix() {
         // Verify the key construction logic by checking the hash-based key format.
         // The full async path requires Redis; here we test the sync prefix selection.
-        let prefix = if true { "rl:w" } else { "rl:r" };
+        let prefix = if true { "rl:user:write" } else { "rl:ip:read" };
         let key = format!("{prefix}:{}", fnv1a_hash("tok_user_1"));
-        assert!(key.starts_with("rl:w:"));
+        assert!(key.starts_with("rl:user:write:"));
     }
 
     #[test]
     fn read_key_uses_read_prefix() {
-        let prefix = if false { "rl:w" } else { "rl:r" };
+        let prefix = if false { "rl:user:write" } else { "rl:ip:read" };
         let key = format!("{prefix}:{}", fnv1a_hash("192.168.1.1"));
-        assert!(key.starts_with("rl:r:"));
+        assert!(key.starts_with("rl:ip:read:"));
     }
 }
