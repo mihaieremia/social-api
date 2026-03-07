@@ -88,7 +88,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(social_api_http_requests_total[$interval]))",
+          "expr": "(sum(rate(social_api_http_requests_total[$interval])) or vector(0)) + (sum(rate(social_api_grpc_requests_total[$interval])) or vector(0))",
           "legendFormat": "req/s",
           "refId": "A"
         }
@@ -156,7 +156,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(social_api_http_requests_total{status=~\"5..\"}[$interval])) / sum(rate(social_api_http_requests_total[$interval])) * 100",
+          "expr": "((sum(rate(social_api_http_requests_total{status=~\"5..\"}[$interval])) or vector(0)) + (sum(rate(social_api_grpc_requests_total{code!=\"OK\"}[$interval])) or vector(0))) / ((sum(rate(social_api_http_requests_total[$interval])) or vector(0)) + (sum(rate(social_api_grpc_requests_total[$interval])) or vector(0))) * 100",
           "legendFormat": "Error %",
           "refId": "A"
         }
@@ -228,8 +228,17 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p50",
+          "legendFormat": "HTTP",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC",
+          "refId": "B"
         }
       ],
       "title": "p50 Latency",
@@ -299,8 +308,17 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p95",
+          "legendFormat": "HTTP",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.9, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC",
+          "refId": "B"
         }
       ],
       "title": "p90 Latency",
@@ -370,8 +388,17 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p99",
+          "legendFormat": "HTTP",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC",
+          "refId": "B"
         }
       ],
       "title": "p99 Latency",
@@ -588,8 +615,8 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "p50"
+              "id": "byRegexp",
+              "options": ".*p50"
             },
             "properties": [
               {
@@ -603,8 +630,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "p90"
+              "id": "byRegexp",
+              "options": ".*p90"
             },
             "properties": [
               {
@@ -618,8 +645,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "p99"
+              "id": "byRegexp",
+              "options": ".*p99"
             },
             "properties": [
               {
@@ -627,6 +654,21 @@
                 "value": {
                   "fixedColor": "red",
                   "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "gRPC.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [10, 5],
+                  "fill": "dash"
                 }
               }
             ]
@@ -665,7 +707,7 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.5, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p50",
+          "legendFormat": "HTTP p50",
           "refId": "A"
         },
         {
@@ -674,7 +716,7 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.9, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p90",
+          "legendFormat": "HTTP p90",
           "refId": "B"
         },
         {
@@ -683,8 +725,35 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.99, sum(rate(social_api_http_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "p99",
+          "legendFormat": "HTTP p99",
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC p50",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.9, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC p90",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
+          "legendFormat": "gRPC p99",
+          "refId": "F"
         }
       ],
       "title": "Latency Overview (p50 / p90 / p99)",
