@@ -25,9 +25,10 @@ use social_api::clients::content_client::ContentValidator;
 use social_api::clients::profile_client::TokenValidator;
 use social_api::config::Config;
 use social_api::db::DbPools;
-use social_api::server::build_router;
+use social_api::server::{build_grpc_server, build_router};
 use social_api::services::like_service::LikeService;
 use social_api::state::AppState;
+use tokio::net::TcpListener;
 
 // ── Shared containers for integration tests ──────────────────────────────────
 
@@ -75,9 +76,13 @@ async fn shared_containers() -> &'static SharedContainers {
         .await
 }
 
-/// A fully wired axum router backed by real Postgres + Redis containers.
+/// A fully wired axum router backed by real Postgres + Redis containers,
+/// plus a tonic gRPC server on a random port.
+#[allow(dead_code)]
 pub struct TestApp {
     pub router: axum::Router,
+    pub grpc_addr: std::net::SocketAddr,
+    _grpc_handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestApp {
@@ -125,8 +130,32 @@ impl TestApp {
 
         let metrics_handle = PrometheusBuilder::new().build_recorder().handle();
 
-        let router = build_router(state, metrics_handle);
-        TestApp { router }
+        let router = build_router(state.clone(), metrics_handle);
+
+        // Boot gRPC on a random available port
+        let grpc_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_addr = grpc_listener.local_addr().expect("grpc local addr");
+
+        let grpc_server = build_grpc_server(state);
+        let _grpc_handle = tokio::spawn(async move {
+            grpc_server
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                    grpc_listener,
+                ))
+                .await
+                .expect("grpc serve");
+        });
+
+        // Give the server a moment to bind
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        TestApp {
+            router,
+            grpc_addr,
+            _grpc_handle,
+        }
     }
 
     /// Send a single request through the router using tower's `oneshot`.
