@@ -762,8 +762,17 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(social_api_http_requests_total{method=\"POST\",path=\"/v1/likes\",status=\"201\"}[$interval]))",
-              "legendFormat": "Likes/s",
+              "expr": "sum(rate(social_api_http_requests_total{method=\"POST\",path=\"/v1/likes\",status=\"201\"}[$interval])) or vector(0)",
+              "legendFormat": "HTTP Likes/s",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/Like\",code=\"OK\"}[$interval])) or vector(0)",
+              "legendFormat": "gRPC Likes/s",
               "refId": "A"
             }
           ],
@@ -830,8 +839,17 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(social_api_http_requests_total{method=\"DELETE\",path=~\"/v1/likes/.*\",status=\"200\"}[$interval]))",
-              "legendFormat": "Unlikes/s",
+              "expr": "sum(rate(social_api_http_requests_total{method=\"DELETE\",path=~\"/v1/likes/.*\",status=\"200\"}[$interval])) or vector(0)",
+              "legendFormat": "HTTP Unlikes/s",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/Unlike\",code=\"OK\"}[$interval])) or vector(0)",
+              "legendFormat": "gRPC Unlikes/s",
               "refId": "A"
             }
           ],
@@ -903,7 +921,16 @@
                 "uid": "prometheus"
               },
               "expr": "sum by (path) (rate(social_api_http_requests_total{method=~\"POST|DELETE\",path=~\"/v1/likes/$content_type.*\"}[$interval]))",
-              "legendFormat": "{{path}}",
+              "legendFormat": "HTTP {{path}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (method) (rate(social_api_grpc_requests_total{method=~\"social.v1.LikeService/(Like|Unlike)\",code=\"OK\"}[$interval]))",
+              "legendFormat": "gRPC {{method}}",
               "refId": "A"
             }
           ],
@@ -971,7 +998,7 @@
                 "uid": "prometheus"
               },
               "expr": "sum(rate(social_api_http_requests_total{path=\"/v1/likes/batch/counts\"}[$interval]))",
-              "legendFormat": "batch/counts",
+              "legendFormat": "HTTP batch/counts",
               "refId": "A"
             },
             {
@@ -980,8 +1007,26 @@
                 "uid": "prometheus"
               },
               "expr": "sum(rate(social_api_http_requests_total{path=\"/v1/likes/batch/statuses\"}[$interval]))",
-              "legendFormat": "batch/statuses",
+              "legendFormat": "HTTP batch/statuses",
               "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/BatchCounts\"}[$interval]))",
+              "legendFormat": "gRPC BatchCounts",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/BatchStatuses\"}[$interval]))",
+              "legendFormat": "gRPC BatchStatuses",
+              "refId": "D"
             }
           ],
           "title": "Batch Request Volume",
@@ -1049,8 +1094,17 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(social_api_http_requests_total{status=\"429\"}[$interval]))",
-              "legendFormat": "429 responses/s",
+              "expr": "sum(rate(social_api_http_requests_total{status=\"429\"}[$interval])) or vector(0)",
+              "legendFormat": "HTTP 429/s",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_grpc_requests_total{code=\"RESOURCE_EXHAUSTED\"}[$interval])) or vector(0)",
+              "legendFormat": "gRPC RESOURCE_EXHAUSTED/s",
               "refId": "A"
             }
           ],
