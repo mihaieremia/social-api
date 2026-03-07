@@ -4,11 +4,9 @@
 //! Every gRPC handler uses these conversions to bridge the transport layer
 //! (protobuf) with the service/repository layer (domain types).
 
-// All functions in this module are building blocks for the gRPC service
-// implementations (Task 8+). Allow dead_code until those consumers land.
-#![allow(dead_code)]
-
-use chrono::{DateTime, TimeZone, Utc};
+#[cfg(test)]
+use chrono::TimeZone;
+use chrono::{DateTime, Utc};
 use prost_types::Timestamp;
 use uuid::Uuid;
 
@@ -29,6 +27,7 @@ pub fn to_proto_timestamp(dt: DateTime<Utc>) -> Timestamp {
 ///
 /// Panics are not possible here because `timestamp_nanos_opt` returns None
 /// only for out-of-range values; we fall back to seconds-only precision.
+#[cfg(test)]
 pub fn from_proto_timestamp(ts: &Timestamp) -> DateTime<Utc> {
     Utc.timestamp_opt(ts.seconds, ts.nanos as u32)
         .single()
@@ -42,6 +41,7 @@ pub fn from_proto_timestamp(ts: &Timestamp) -> DateTime<Utc> {
 // ── TimeWindow helpers ───────────────────────────────────────────────
 
 /// Convert a domain `TimeWindow` to the proto enum i32 value.
+#[cfg(test)]
 pub fn to_proto_window(w: types::TimeWindow) -> i32 {
     match w {
         types::TimeWindow::Day => social_v1::TimeWindow::Day as i32,

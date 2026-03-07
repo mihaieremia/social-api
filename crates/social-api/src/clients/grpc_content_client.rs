@@ -62,7 +62,12 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
         match response {
             Ok(resp) => {
                 let valid = resp.into_inner().exists;
-                super::metrics::record_external_call("content_api", "validate_grpc", "OK", latency);
+                super::metrics::record_external_call(
+                    "content_api",
+                    "validate_grpc",
+                    "OK".to_string(),
+                    latency,
+                );
 
                 let ttl = if valid {
                     self.config.cache_ttl_content_validation_secs
@@ -79,7 +84,7 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
                 super::metrics::record_external_call(
                     "content_api",
                     "validate_grpc",
-                    &status.code().to_string(),
+                    status.code().to_string(),
                     latency,
                 );
                 tracing::error!(

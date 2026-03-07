@@ -17,38 +17,11 @@ pub struct DbPools {
 impl DbPools {
     /// Create writer and reader pools from config.
     pub async fn from_config(config: &Config) -> Result<Self, sqlx::Error> {
-        // Disable test_before_acquire to eliminate ~20k extra SELECT 1 queries/sec
-        // at 10k RPS. Stale connections fail on first use and are transparently
-        // reconnected by SQLx. idle_timeout + max_lifetime provide safety nets.
-        let writer = PgPoolOptions::new()
-            .max_connections(config.db_max_connections)
-            .min_connections(config.db_min_connections)
-            .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
-            .test_before_acquire(false)
-            .idle_timeout(Duration::from_secs(300))
-            .max_lifetime(Duration::from_secs(1800))
-            .after_connect(|_conn, _meta| {
-                Box::pin(async move {
-                    tracing::debug!("New writer DB connection established");
-                    Ok(())
-                })
-            })
+        let writer = pool_options(config, "writer")
             .connect(&config.database_url)
             .await?;
 
-        let reader = PgPoolOptions::new()
-            .max_connections(config.db_max_connections)
-            .min_connections(config.db_min_connections)
-            .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
-            .test_before_acquire(false)
-            .idle_timeout(Duration::from_secs(300))
-            .max_lifetime(Duration::from_secs(1800))
-            .after_connect(|_conn, _meta| {
-                Box::pin(async move {
-                    tracing::debug!("New reader DB connection established");
-                    Ok(())
-                })
-            })
+        let reader = pool_options(config, "reader")
             .connect(&config.read_database_url)
             .await?;
 
@@ -78,4 +51,21 @@ impl DbPools {
         );
         writer_ok.is_ok() && reader_ok.is_ok()
     }
+}
+
+/// Build shared `PgPoolOptions` for a given role ("writer" or "reader").
+fn pool_options(config: &Config, role: &'static str) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(config.db_max_connections)
+        .min_connections(config.db_min_connections)
+        .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
+        .test_before_acquire(false)
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
+        .after_connect(move |_conn, _meta| {
+            Box::pin(async move {
+                tracing::debug!("New {role} DB connection established");
+                Ok(())
+            })
+        })
 }

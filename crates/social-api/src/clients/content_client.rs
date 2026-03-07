@@ -64,13 +64,18 @@ impl ContentValidator for HttpContentValidator {
                 super::metrics::record_external_call(
                     "content_api",
                     "validate",
-                    &r.status().as_u16().to_string(),
+                    r.status().as_u16().to_string(),
                     latency,
                 );
                 r
             }
             Err(e) => {
-                super::metrics::record_external_call("content_api", "validate", "error", latency);
+                super::metrics::record_external_call(
+                    "content_api",
+                    "validate",
+                    "error".to_string(),
+                    latency,
+                );
                 tracing::error!(
                     service = "content_api",
                     content_type = content_type,

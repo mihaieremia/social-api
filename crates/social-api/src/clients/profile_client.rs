@@ -35,14 +35,7 @@ impl HttpTokenValidator {
     /// Compute a FNV-1a hash of the token and return it as a Redis cache key.
     /// The raw token is never stored — only its hash.
     fn token_cache_key(token: &str) -> String {
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x00000100000001B3;
-        let mut hash = FNV_OFFSET;
-        for byte in token.as_bytes() {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        format!("tok:{hash:x}")
+        format!("tok:{:x}", crate::middleware::rate_limit::fnv1a_hash(token))
     }
 }
 
@@ -74,13 +67,18 @@ impl TokenValidator for HttpTokenValidator {
                 super::metrics::record_external_call(
                     "profile_api",
                     "validate",
-                    &r.status().as_u16().to_string(),
+                    r.status().as_u16().to_string(),
                     latency,
                 );
                 r
             }
             Err(e) => {
-                super::metrics::record_external_call("profile_api", "validate", "error", latency);
+                super::metrics::record_external_call(
+                    "profile_api",
+                    "validate",
+                    "error".to_string(),
+                    latency,
+                );
                 tracing::error!(
                     service = "profile_api",
                     error = %e,

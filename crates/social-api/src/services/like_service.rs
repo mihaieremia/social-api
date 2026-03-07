@@ -50,8 +50,8 @@ impl LikeService {
         }
     }
 
-    /// Test constructor — accepts a pre-built ContentValidator trait object.
-    /// Production code uses `new()` which builds `HttpContentValidator`.
+    /// Constructor accepting a pre-built ContentValidator trait object.
+    /// Used by integration tests and anywhere a custom validator is needed.
     #[allow(dead_code)]
     pub fn new_with_validator(
         db: DbPools,
@@ -109,20 +109,21 @@ impl LikeService {
         }
 
         // Use the authoritative count from the write transaction.
-        // This avoids the race where a concurrent request reads a stale db_count
-        // from the reader pool and then conditional_incr double-counts.
+        // Use the authoritative count from the write transaction to avoid
+        // races where a concurrent request reads a stale count from the reader.
         let count = result.count;
         self.write_count_to_cache(content_type, content_id, count)
             .await;
 
         if !result.already_existed {
             self.publish_like_event(
-                "like",
+                LikeEvent::Liked {
+                    user_id,
+                    count,
+                    timestamp: result.row.created_at,
+                },
                 content_type,
                 content_id,
-                user_id,
-                count,
-                result.row.created_at,
             )
             .await;
             Self::record_like_metric("like", content_type);
@@ -159,12 +160,13 @@ impl LikeService {
         // Publish SSE event
         if result.was_liked {
             self.publish_like_event(
-                "unlike",
+                LikeEvent::Unliked {
+                    user_id,
+                    count,
+                    timestamp: Utc::now(),
+                },
                 content_type,
                 content_id,
-                user_id,
-                count,
-                chrono::Utc::now(),
             )
             .await;
             Self::record_like_metric("unlike", content_type);
@@ -204,7 +206,7 @@ impl LikeService {
     /// fixed sleep delay. If the fetcher fails, the sender drops, waiters
     /// receive `Err` on `changed()` and fall back to DB directly.
     async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
-        let cache_key = format!("lc:{content_type}:{content_id}");
+        let cache_key = count_cache_key(content_type, content_id);
 
         // Fast path: cache hit
         if let Some(cached) = self.cache.get(&cache_key).await
@@ -239,17 +241,11 @@ impl LikeService {
         // wasting memory until overwritten by a future insert().
         match result {
             Ok(count) => {
-                self.cache
-                    .set(
-                        &cache_key,
-                        &count.to_string(),
-                        self.config.cache_ttl_like_counts_secs,
-                    )
-                    .await;
-
                 // Wake all waiters immediately with the fetched count.
-                tx.send(Some(count)).ok();
+                let _ = tx.send(Some(count));
                 self.pending_fetches.remove(&cache_key);
+                self.write_count_to_cache(content_type, content_id, count)
+                    .await;
                 Ok(count)
             }
             Err(e) => {
@@ -353,7 +349,7 @@ impl LikeService {
         // Try Redis MGET first
         let mut cache_keys = Vec::with_capacity(items.len());
         for (ct, cid) in items {
-            cache_keys.push(format!("lc:{ct}:{cid}"));
+            cache_keys.push(count_cache_key(ct, *cid));
         }
 
         let cached_values = self.cache.mget(&cache_keys).await;
@@ -399,7 +395,7 @@ impl LikeService {
                     Err(e) => return Err(e),
                 }
             }
-            // get_count_inner already populates individual cache keys — no separate mset_ex needed.
+            // get_count_inner already populates individual cache keys — no separate batch set needed.
         }
 
         Ok(results)
@@ -514,7 +510,7 @@ impl LikeService {
     /// new total_count. This is a write-through pattern — the cache always
     /// reflects the value the DB just told us.
     async fn write_count_to_cache(&self, content_type: &str, content_id: Uuid, count: i64) {
-        let cache_key = format!("lc:{content_type}:{content_id}");
+        let cache_key = count_cache_key(content_type, content_id);
         self.cache
             .set(
                 &cache_key,
@@ -525,35 +521,25 @@ impl LikeService {
     }
 
     /// Publish a like/unlike SSE event to the Redis pub/sub channel for the
-    /// given content item. The JSON envelope matches what SSE subscribers
-    /// expect: `{ event, user_id, count, timestamp }`.
-    async fn publish_like_event(
-        &self,
-        event_type: &str,
-        content_type: &str,
-        content_id: Uuid,
-        user_id: Uuid,
-        count: i64,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) {
-        let event = serde_json::json!({
-            "event": event_type,
-            "user_id": user_id,
-            "count": count,
-            "timestamp": timestamp.to_rfc3339(),
-        });
+    /// given content item. Serializes the strongly-typed `LikeEvent` enum
+    /// so the JSON shape is defined in one place (`shared::types`).
+    async fn publish_like_event(&self, event: LikeEvent, content_type: &str, content_id: Uuid) {
         let channel = format!("sse:{content_type}:{content_id}");
-        self.cache.publish(&channel, &event.to_string()).await;
+        if let Ok(json) = serde_json::to_string(&event) {
+            self.cache.publish(&channel, &json).await;
+        }
     }
 
     /// Record a like/unlike operation metric.
     ///
     /// Associated function (no `&self`) — metrics are global counters.
-    fn record_like_metric(operation: &str, content_type: &str) {
+    /// `operation` is `&'static str` because callers always pass literals
+    /// ("like" / "unlike"), avoiding a `.to_string()` allocation.
+    fn record_like_metric(operation: &'static str, content_type: &str) {
         metrics::counter!(
             "social_api_likes_total",
             "content_type" => content_type.to_string(),
-            "operation" => operation.to_string(),
+            "operation" => operation,
         )
         .increment(1);
     }
@@ -594,6 +580,11 @@ impl LikeService {
             }
         }
     }
+}
+
+/// Build the Redis cache key for a like count: `lc:{content_type}:{content_id}`.
+fn count_cache_key(content_type: &str, content_id: Uuid) -> String {
+    format!("lc:{content_type}:{content_id}")
 }
 
 /// Parse a sorted-set member string `"content_type:content_id"` back into a

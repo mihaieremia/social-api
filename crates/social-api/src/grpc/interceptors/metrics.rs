@@ -10,17 +10,17 @@ use std::time::Instant;
 /// - `method`: the fully-qualified gRPC method name (e.g., `"social.v1.LikeService/Like"`).
 /// - `code`: the gRPC status code string (e.g., `"OK"`, `"NOT_FOUND"`).
 /// - `start`: the `Instant` captured at the beginning of the handler.
-pub fn record_grpc_request(method: &str, code: &str, start: Instant) {
+pub fn record_grpc_request(method: &'static str, code: &'static str, start: Instant) {
     let latency = start.elapsed().as_secs_f64();
     metrics::counter!(
         "social_api_grpc_requests_total",
-        "method" => method.to_owned(),
-        "code" => code.to_owned(),
+        "method" => method,
+        "code" => code,
     )
     .increment(1);
     metrics::histogram!(
         "social_api_grpc_request_duration_seconds",
-        "method" => method.to_owned(),
+        "method" => method,
     )
     .record(latency);
 }

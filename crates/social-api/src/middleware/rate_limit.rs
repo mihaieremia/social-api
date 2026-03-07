@@ -184,10 +184,9 @@ pub async fn write_rate_limit(
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
 
-    let key = format!("rl:w:{}", fnv1a_hash(&user_token));
+    let key = format!("rl:w:{}", fnv1a_hash(user_token));
     let limit = state.config().rate_limit_write_per_minute;
     let result = check_rate_limit_inner(state.cache(), &key, limit, 60).await;
 

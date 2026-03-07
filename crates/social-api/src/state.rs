@@ -45,17 +45,8 @@ impl AppState {
             .build()
             .expect("Failed to build HTTP client");
 
-        let profile_breaker = build_profile_breaker(&config);
-
-        let content_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
-            failure_threshold: config.circuit_breaker_failure_threshold,
-            recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
-            success_threshold: config.circuit_breaker_success_threshold,
-            service_name: "content_api".to_string(),
-            rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
-            failure_rate_threshold: 0.5,
-            min_calls_for_rate: 10,
-        }));
+        let profile_breaker = build_circuit_breaker(&config, "profile_api");
+        let content_breaker = build_circuit_breaker(&config, "content_api");
 
         let token_validator: Box<dyn TokenValidator> = if config.use_grpc_transport() {
             match crate::clients::grpc_profile_client::GrpcTokenValidator::new(
@@ -197,12 +188,6 @@ impl AppState {
         self.inner.inflight_count.load(Ordering::Relaxed)
     }
 
-    /// Expose `inflight_count` atomically for tests and shutdown drain.
-    #[allow(dead_code)]
-    pub fn inflight_count_arc(&self) -> usize {
-        self.inflight_count()
-    }
-
     #[allow(dead_code)]
     pub fn new_for_test(
         db: DbPools,
@@ -212,7 +197,7 @@ impl AppState {
         token_validator: Box<dyn TokenValidator>,
         like_service: LikeService,
     ) -> Self {
-        let profile_breaker = build_profile_breaker(&config);
+        let profile_breaker = build_circuit_breaker(&config, "profile_api");
         let http_client = reqwest::Client::new();
         let pubsub_manager = PubSubManager::new(
             config.redis_url.clone(),
@@ -236,12 +221,12 @@ impl AppState {
     }
 }
 
-fn build_profile_breaker(config: &Config) -> Arc<CircuitBreaker> {
+fn build_circuit_breaker(config: &Config, name: &str) -> Arc<CircuitBreaker> {
     Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
         failure_threshold: config.circuit_breaker_failure_threshold,
         recovery_timeout: Duration::from_secs(config.circuit_breaker_recovery_timeout_secs),
         success_threshold: config.circuit_breaker_success_threshold,
-        service_name: "profile_api".to_string(),
+        service_name: name.to_string(),
         rate_window: Duration::from_secs(config.circuit_breaker_rate_window_secs),
         failure_rate_threshold: 0.5,
         min_calls_for_rate: 10,
@@ -312,11 +297,5 @@ mod tests {
         let state2 = state.clone();
         state.inflight_increment();
         assert_eq!(state2.inflight_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_appstate_inflight_count_arc() {
-        let state = make_state().await;
-        assert_eq!(state.inflight_count_arc(), 0);
     }
 }

@@ -58,7 +58,7 @@ repositories/
   like_repository.rs             # ALL SQL: insert_like, delete_like, get_count, get_status, get_user_likes, get_leaderboard
 
 cache/
-  manager.rs                     # CacheManager: get/set/del/incr/decr/mget/mset_ex/publish/zrevrange/replace_sorted_set/set_nx
+  manager.rs                     # CacheManager: get/set/mget/publish/zrevrange/replace_sorted_set/invoke_script
 
 clients/
   content_client.rs              # ContentValidator trait + HttpContentValidator

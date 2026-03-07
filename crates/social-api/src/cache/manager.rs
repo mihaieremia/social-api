@@ -2,7 +2,6 @@ use bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use metrics::counter;
 use redis::AsyncCommands;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -12,53 +11,6 @@ use crate::config::Config;
 /// All operations catch Redis errors and return None/Ok instead of propagating.
 /// The service continues operating with degraded performance when Redis is down.
 pub type RedisPool = Pool<RedisConnectionManager>;
-
-/// Lua script: atomically INCR an existing key or SET from DB count if missing.
-/// Prevents ghost counts when INCR is called on an expired/non-existent key.
-#[allow(dead_code)]
-static CONDITIONAL_INCR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-local key = KEYS[1]
-local ttl = tonumber(ARGV[1])
-local db_count = tonumber(ARGV[2])
-
-if redis.call('EXISTS', key) == 1 then
-  local val = redis.call('INCRBY', key, 1)
-  redis.call('EXPIRE', key, ttl)
-  return val
-else
-  redis.call('SET', key, db_count, 'EX', ttl)
-  return db_count
-end
-"#,
-    )
-});
-
-/// Lua script: atomically DECR an existing key (floor at 0) or SET from DB count.
-#[allow(dead_code)]
-static CONDITIONAL_DECR_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-local key = KEYS[1]
-local ttl = tonumber(ARGV[1])
-local db_count = tonumber(ARGV[2])
-
-if redis.call('EXISTS', key) == 1 then
-  local val = redis.call('DECRBY', key, 1)
-  if tonumber(val) < 0 then
-    redis.call('SET', key, 0, 'EX', ttl)
-    return 0
-  end
-  redis.call('EXPIRE', key, ttl)
-  return val
-else
-  redis.call('SET', key, db_count, 'EX', ttl)
-  return db_count
-end
-"#,
-    )
-});
 
 /// Create a bb8 Redis connection pool from config.
 pub async fn create_pool(config: &Config) -> Result<RedisPool, Box<dyn std::error::Error>> {
@@ -132,6 +84,7 @@ impl CacheManager {
     }
 
     /// Delete a key. Silently fails on Redis error.
+    /// Used only by integration tests (cache flush for cold-cache benchmarks).
     #[allow(dead_code)]
     pub async fn del(&self, key: &str) {
         let mut conn = match self.pool.get().await {
@@ -143,73 +96,6 @@ impl CacheManager {
         };
         if let Err(e) = conn.del::<_, ()>(key).await {
             tracing::warn!(key = key, error = %e, "Redis DEL failed");
-        }
-    }
-
-    /// Conditionally INCR: if key exists, INCR + refresh TTL. If missing, SET to db_count.
-    /// Prevents ghost counts when INCR hits an expired key.
-    #[allow(dead_code)]
-    pub async fn conditional_incr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis pool GET failed for conditional_incr");
-                return None;
-            }
-        };
-
-        let ttl_str = ttl_secs.to_string();
-        let db_count_str = db_count.to_string();
-
-        match CONDITIONAL_INCR_SCRIPT
-            .key(key)
-            .arg(ttl_str)
-            .arg(db_count_str)
-            .invoke_async::<i64>(&mut *conn)
-            .await
-        {
-            Ok(val) => {
-                counter!("social_api_cache_operations_total", "operation" => "conditional_incr", "result" => "ok").increment(1);
-                Some(val)
-            }
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "conditional_incr", "result" => "error").increment(1);
-                tracing::warn!(key = key, error = %e, "Redis conditional INCR script failed");
-                None
-            }
-        }
-    }
-
-    /// Conditionally DECR: if key exists, DECR (floor 0) + refresh TTL. If missing, SET to db_count.
-    #[allow(dead_code)]
-    pub async fn conditional_decr(&self, key: &str, ttl_secs: u64, db_count: i64) -> Option<i64> {
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis pool GET failed for conditional_decr");
-                return None;
-            }
-        };
-
-        let ttl_str = ttl_secs.to_string();
-        let db_count_str = db_count.to_string();
-
-        match CONDITIONAL_DECR_SCRIPT
-            .key(key)
-            .arg(ttl_str)
-            .arg(db_count_str)
-            .invoke_async::<i64>(&mut *conn)
-            .await
-        {
-            Ok(val) => {
-                counter!("social_api_cache_operations_total", "operation" => "conditional_decr", "result" => "ok").increment(1);
-                Some(val)
-            }
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "conditional_decr", "result" => "error").increment(1);
-                tracing::warn!(key = key, error = %e, "Redis conditional DECR script failed");
-                None
-            }
         }
     }
 
@@ -241,34 +127,6 @@ impl CacheManager {
             Err(e) => {
                 tracing::warn!(error = %e, "Redis script EVALSHA/EVAL failed");
                 None
-            }
-        }
-    }
-
-    /// Set a key with TTL only if it doesn't exist (for stampede lock).
-    /// Returns true if the key was set (did not previously exist).
-    #[allow(dead_code)]
-    pub async fn set_nx(&self, key: &str, value: &str, ttl_secs: u64) -> bool {
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        // SET key value NX EX ttl
-        let result: Result<bool, _> = redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async(&mut *conn)
-            .await;
-
-        match result {
-            Ok(acquired) => acquired,
-            Err(e) => {
-                tracing::warn!(key = key, error = %e, "Redis SET NX failed");
-                false
             }
         }
     }
@@ -308,43 +166,6 @@ impl CacheManager {
                 counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis MGET failed");
                 vec![None; keys.len()]
-            }
-        }
-    }
-
-    /// Pipeline SET EX for multiple keys. Single round-trip instead of N sequential SETs.
-    #[allow(dead_code)]
-    pub async fn mset_ex(&self, entries: &[(&str, &str, u64)]) {
-        if entries.is_empty() {
-            return;
-        }
-
-        let mut conn = match self.pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
-                tracing::warn!(error = %e, "Redis pool GET failed for MSET pipeline");
-                return;
-            }
-        };
-
-        let mut pipe = redis::pipe();
-        for (key, value, ttl) in entries {
-            pipe.cmd("SET")
-                .arg(*key)
-                .arg(*value)
-                .arg("EX")
-                .arg(*ttl)
-                .ignore();
-        }
-
-        match pipe.query_async::<()>(&mut *conn).await {
-            Ok(()) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "ok").increment(entries.len() as u64);
-            }
-            Err(e) => {
-                counter!("social_api_cache_operations_total", "operation" => "mset_ex", "result" => "error").increment(1);
-                tracing::warn!(error = %e, "Redis MSET pipeline failed");
             }
         }
     }
@@ -448,13 +269,13 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 1. get / set / del
+    // 1. get / set round-trip
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_get_set_del() {
+    async fn test_get_set() {
         let cache = make_cache().await;
-        let key = "test:get_set_del";
+        let key = "test:get_set";
 
         // Nothing there yet
         assert_eq!(cache.get(key).await, None);
@@ -462,10 +283,6 @@ mod tests {
         // Set, then retrieve
         cache.set(key, "hello", 60).await;
         assert_eq!(cache.get(key).await, Some("hello".to_string()));
-
-        // Delete, then miss
-        cache.del(key).await;
-        assert_eq!(cache.get(key).await, None);
     }
 
     // -------------------------------------------------------------------------
@@ -479,97 +296,15 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 3. conditional_incr on missing key → populates from db_count
+    // 3. mget returns hits, misses, and empty input
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_conditional_incr_populates_missing_key() {
-        let cache = make_cache().await;
-        let key = "test:cond_incr_missing";
-
-        // Key does not exist; script should SET it to db_count=5 and return 5
-        let result = cache.conditional_incr(key, 60, 5).await;
-        assert_eq!(result, Some(5));
-
-        // The key should now be readable
-        assert_eq!(cache.get(key).await, Some("5".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 4. conditional_incr on existing key → INCR
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_conditional_incr_existing_key() {
-        let cache = make_cache().await;
-        let key = "test:cond_incr_existing";
-
-        // Pre-populate the key to 10
-        cache.set(key, "10", 60).await;
-
-        // INCR should push it to 11
-        let result = cache.conditional_incr(key, 60, 0).await;
-        assert_eq!(result, Some(11));
-        assert_eq!(cache.get(key).await, Some("11".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 5. conditional_decr on existing key → DECR
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_conditional_decr_existing_key() {
-        let cache = make_cache().await;
-        let key = "test:cond_decr_existing";
-
-        cache.set(key, "5", 60).await;
-
-        let result = cache.conditional_decr(key, 60, 0).await;
-        assert_eq!(result, Some(4));
-        assert_eq!(cache.get(key).await, Some("4".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 6. conditional_decr does not go negative (floor at 0)
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_conditional_decr_does_not_go_negative() {
-        let cache = make_cache().await;
-        let key = "test:cond_decr_floor";
-
-        cache.set(key, "0", 60).await;
-
-        let result = cache.conditional_decr(key, 60, 0).await;
-        assert_eq!(result, Some(0));
-        assert_eq!(cache.get(key).await, Some("0".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 7. conditional_decr on missing key → populates from db_count
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_conditional_decr_populates_missing_key() {
-        let cache = make_cache().await;
-        let key = "test:cond_decr_missing";
-
-        let result = cache.conditional_decr(key, 60, 7).await;
-        assert_eq!(result, Some(7));
-        assert_eq!(cache.get(key).await, Some("7".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 8. mget / mset_ex
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_mget_mset_ex() {
+    async fn test_mget() {
         let cache = make_cache().await;
 
-        let entries: Vec<(&str, &str, u64)> =
-            vec![("test:mget_k1", "100", 60), ("test:mget_k2", "200", 60)];
-        cache.mset_ex(&entries).await;
+        cache.set("test:mget_k1", "100", 60).await;
+        cache.set("test:mget_k2", "200", 60).await;
 
         let keys: Vec<String> = vec![
             "test:mget_k1".to_string(),
@@ -584,10 +319,6 @@ mod tests {
         assert_eq!(results[2], None);
     }
 
-    // -------------------------------------------------------------------------
-    // 9. mget with empty input returns empty vec
-    // -------------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_mget_empty_input_returns_empty() {
         let cache = make_cache().await;
@@ -596,26 +327,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 10. set_nx only sets once
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_set_nx_only_sets_once() {
-        let cache = make_cache().await;
-        let key = "test:set_nx_lock";
-
-        let first = cache.set_nx(key, "locked", 60).await;
-        assert!(first, "first set_nx should succeed");
-
-        let second = cache.set_nx(key, "locked_again", 60).await;
-        assert!(!second, "second set_nx should fail (key already exists)");
-
-        // Value should still be from the first call
-        assert_eq!(cache.get(key).await, Some("locked".to_string()));
-    }
-
-    // -------------------------------------------------------------------------
-    // 11. replace_sorted_set then zrevrange_with_scores returns descending order
+    // 4. replace_sorted_set then zrevrange_with_scores returns descending order
     // -------------------------------------------------------------------------
 
     #[tokio::test]
@@ -643,7 +355,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 12. replace_sorted_set overwrites previous entries
+    // 5. replace_sorted_set overwrites previous entries
     // -------------------------------------------------------------------------
 
     #[tokio::test]
@@ -668,7 +380,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 13. is_healthy returns true when Redis is reachable
+    // 6. is_healthy returns true when Redis is reachable
     // -------------------------------------------------------------------------
 
     #[tokio::test]
@@ -678,11 +390,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // 14. Redis-unavailable degradation: all methods return safe defaults
+    // 7. Redis-unavailable degradation: all methods return safe defaults
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_redis_unavailable_get_returns_none() {
+    async fn test_redis_unavailable_returns_safe_defaults() {
         // Point at a port that has no Redis; use a very short connection timeout
         // so the test completes quickly.
         let manager = bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:19998").unwrap();
@@ -694,18 +406,15 @@ mod tests {
             .unwrap();
         let cache = CacheManager::new(pool);
 
-        // get → None
+        // get -> None
         assert_eq!(cache.get("any_key").await, None);
 
-        // conditional_incr → None
-        assert_eq!(cache.conditional_incr("any_key", 60, 5).await, None);
-
-        // set_nx → false
-        assert!(!cache.set_nx("any_key", "v", 60).await);
-
-        // mget → vec of None
+        // mget -> vec of None
         let keys = vec!["k1".to_string(), "k2".to_string()];
         let results = cache.mget(&keys).await;
         assert_eq!(results, vec![None, None]);
+
+        // is_healthy -> false
+        assert!(!cache.is_healthy().await);
     }
 }

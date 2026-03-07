@@ -65,7 +65,12 @@ impl TokenValidator for GrpcTokenValidator {
         match response {
             Ok(resp) => {
                 let inner = resp.into_inner();
-                super::metrics::record_external_call("profile_api", "validate_grpc", "OK", latency);
+                super::metrics::record_external_call(
+                    "profile_api",
+                    "validate_grpc",
+                    "OK".to_string(),
+                    latency,
+                );
 
                 if !inner.valid {
                     return Err(AppError::Unauthorized(
@@ -92,7 +97,7 @@ impl TokenValidator for GrpcTokenValidator {
                 super::metrics::record_external_call(
                     "profile_api",
                     "validate_grpc",
-                    &status.code().to_string(),
+                    status.code().to_string(),
                     latency,
                 );
 

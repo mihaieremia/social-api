@@ -3,10 +3,11 @@ use std::time::Instant;
 
 /// Middleware that records HTTP request metrics.
 ///
-/// Avoids per-request String allocations by using `&'static str` for method
-/// and reusing the normalized path across counter + histogram.
+/// Minimises per-request heap allocations: `method` uses `as_str()` (`&str`,
+/// no allocation), `status_str` is `&'static str`, and only `path` is a
+/// runtime `String` (unavoidable due to UUID normalisation).
 pub async fn track_metrics(request: Request, next: Next) -> Response {
-    let method = request.method().to_string();
+    let method = request.method().as_str().to_owned();
     let path = normalize_path(request.uri().path());
     let start = Instant::now();
 
@@ -15,7 +16,7 @@ pub async fn track_metrics(request: Request, next: Next) -> Response {
     let status = response.status().as_u16();
     let latency = start.elapsed().as_secs_f64();
 
-    // Status is a 3-digit number — use a small inline string to avoid heap allocation.
+    // Status is a 3-digit number — use a `&'static str` to avoid heap allocation.
     let status_str = match status {
         200 => "200",
         201 => "201",
@@ -31,15 +32,15 @@ pub async fn track_metrics(request: Request, next: Next) -> Response {
 
     metrics::counter!(
         "social_api_http_requests_total",
-        "method" => method.to_owned(),
+        "method" => method.clone(),
         "path" => path.clone(),
-        "status" => status_str.to_owned(),
+        "status" => status_str,
     )
     .increment(1);
 
     metrics::histogram!(
         "social_api_http_request_duration_seconds",
-        "method" => method.to_owned(),
+        "method" => method,
         "path" => path,
     )
     .record(latency);

@@ -114,7 +114,7 @@ impl PubSubManager {
     }
 
     /// Returns the number of active channels (for metrics/debugging).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn active_channels(&self) -> usize {
         self.inner.channels.len()
     }

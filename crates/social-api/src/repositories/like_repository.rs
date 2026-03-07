@@ -264,7 +264,7 @@ pub async fn get_user_likes(
 
     if let Some(ct) = content_type_filter {
         qb.push(" AND content_type = ");
-        qb.push_bind(ct.to_string());
+        qb.push_bind(ct);
     }
 
     if let (Some(ts), Some(id)) = (cursor_ts, cursor_id) {
@@ -330,7 +330,7 @@ pub async fn get_leaderboard(
             qb.push_bind(since_ts);
             if let Some(ct) = content_type {
                 qb.push(" AND content_type = ");
-                qb.push_bind(ct.to_string());
+                qb.push_bind(ct);
             }
             qb.push(" GROUP BY content_type, content_id ORDER BY count DESC LIMIT ");
             qb.push_bind(limit);
@@ -343,7 +343,7 @@ pub async fn get_leaderboard(
             );
             if let Some(ct) = content_type {
                 qb.push(" WHERE content_type = ");
-                qb.push_bind(ct.to_string());
+                qb.push_bind(ct);
             }
             qb.push(" ORDER BY total_count DESC LIMIT ");
             qb.push_bind(limit);
