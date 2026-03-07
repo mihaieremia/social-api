@@ -773,7 +773,7 @@
               },
               "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/Like\",code=\"OK\"}[$interval])) or vector(0)",
               "legendFormat": "gRPC Likes/s",
-              "refId": "A"
+              "refId": "B"
             }
           ],
           "title": "Like Rate",
@@ -850,7 +850,7 @@
               },
               "expr": "sum(rate(social_api_grpc_requests_total{method=\"social.v1.LikeService/Unlike\",code=\"OK\"}[$interval])) or vector(0)",
               "legendFormat": "gRPC Unlikes/s",
-              "refId": "A"
+              "refId": "B"
             }
           ],
           "title": "Unlike Rate",
@@ -931,7 +931,7 @@
               },
               "expr": "sum by (method) (rate(social_api_grpc_requests_total{method=~\"social.v1.LikeService/(Like|Unlike)\",code=\"OK\"}[$interval]))",
               "legendFormat": "gRPC {{method}}",
-              "refId": "A"
+              "refId": "B"
             }
           ],
           "title": "Likes by Content Type",
@@ -1105,7 +1105,7 @@
               },
               "expr": "sum(rate(social_api_grpc_requests_total{code=\"RESOURCE_EXHAUSTED\"}[$interval])) or vector(0)",
               "legendFormat": "gRPC RESOURCE_EXHAUSTED/s",
-              "refId": "A"
+              "refId": "B"
             }
           ],
           "title": "Rate Limited Requests",

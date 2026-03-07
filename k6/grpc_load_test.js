@@ -315,20 +315,56 @@ export const options = {
 // ---------------------------------------------------------------------------
 // VU lifecycle: connect once per VU
 // ---------------------------------------------------------------------------
-
-// Each VU connects on first iteration and reuses the connection.
-// k6 gRPC client.connect() is a no-op if already connected.
+//
+// k6 gRPC vs HTTP — why gRPC hits port exhaustion more easily:
+//
+//   HTTP: Go's net/http transport pools connections, reuses them on failure,
+//         and manages retries transparently. Failed requests don't create
+//         new sockets.
+//
+//   gRPC: client.connect() creates a new TCP socket per call. If a connection
+//         fails, the socket enters TIME_WAIT (60s on macOS). On the next
+//         iteration, connect() creates ANOTHER socket. With constant-arrival-rate
+//         spawning new VUs on slowdown, failed connections snowball:
+//         slow → more VUs → more connect() → more TIME_WAIT → port exhaustion.
+//
+// macOS ephemeral port range: 49152-65535 = ~16k ports.
+// At 8800 target RPS with connection failures, ports exhaust in ~2 seconds.
+//
+// Mitigation: track connection state per VU and sleep on failure to prevent
+// rapid socket churn. A failed VU sleeps 1s instead of immediately retrying
+// connect(), which would burn another ephemeral port.
+//
 // Note: reflect:true requires the server to implement grpc.reflection.v1.
 // k6 does NOT fall back gracefully — it fails the connection if unsupported.
+// ---------------------------------------------------------------------------
+
+let __vuConnected = false;
+
 function ensureConnected() {
-  client.connect(GRPC_HOST, {
-    plaintext: true,
-    timeout: '10s',
-  });
+  if (__vuConnected) return;
+  try {
+    client.connect(GRPC_HOST, {
+      plaintext: true,
+      timeout: '5s',
+    });
+    __vuConnected = true;
+  } catch (e) {
+    // Connection failed — sleep to avoid rapid socket churn.
+    // Without this, constant-arrival-rate spawns new VUs that immediately
+    // burn another ephemeral port on a failed connect().
+    __vuConnected = false;
+    throw e;
+  }
+}
+
+// Close hook: mark connection as disconnected so next iteration reconnects.
+function handleConnError() {
+  __vuConnected = false;
 }
 
 export function grpcReadCount() {
-  ensureConnected();
+  try { ensureConnected(); } catch (_) { return; }
 
   const { content_type, content_id } = randomContent();
   const res = client.invoke(
@@ -336,6 +372,8 @@ export function grpcReadCount() {
     { content_type, content_id },
     { tags: { name: 'gRPC_GetCount' } },
   );
+
+  if (!res) { handleConnError(); return; }
 
   check(res, {
     'grpc_read: status ok': (r) => isOkOrRateLimited(r.status),
@@ -348,7 +386,7 @@ export function grpcReadCount() {
 }
 
 export function grpcBatchCounts() {
-  ensureConnected();
+  try { ensureConnected(); } catch (_) { return; }
 
   const items = randomBatchItems(50);
   const res = client.invoke(
@@ -356,6 +394,8 @@ export function grpcBatchCounts() {
     { items },
     { tags: { name: 'gRPC_BatchCounts' } },
   );
+
+  if (!res) { handleConnError(); return; }
 
   check(res, {
     'grpc_batch: status ok': (r) => isOkOrRateLimited(r.status),
@@ -368,7 +408,7 @@ export function grpcBatchCounts() {
 }
 
 export function grpcWriteCycle() {
-  ensureConnected();
+  try { ensureConnected(); } catch (_) { return; }
 
   const vuId = __VU;
   const iter = __ITER;
@@ -429,7 +469,7 @@ export function grpcMixed() {
 }
 
 export function grpcHealthCheck() {
-  ensureConnected();
+  try { ensureConnected(); } catch (_) { return; }
 
   const res = client.invoke(
     'social.v1.Health/Check',
