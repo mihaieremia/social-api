@@ -81,6 +81,81 @@ groups:
           summary: "P99 latency exceeds 250ms for 2 minutes"
           dashboard_row: "HTTP Traffic"
 
+      - uid: grpc-high-error-rate
+        title: "gRPC High Error Rate"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_grpc_requests_total{code!="0"}[5m]))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(social_api_grpc_requests_total[5m]))
+              instant: true
+              refId: B
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "($A / $B) * 100"
+              refId: C
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "gRPC error rate exceeds 2% over 5 minutes"
+          dashboard_row: "gRPC Traffic"
+
+      - uid: grpc-critical-latency-p99
+        title: "gRPC Critical Latency P99"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.25]
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "gRPC P99 latency exceeds 250ms for 2 minutes"
+          dashboard_row: "gRPC Traffic"
+
       - uid: circuit-breaker-open
         title: "Circuit Breaker Open"
         condition: A
@@ -169,6 +244,70 @@ groups:
           severity: warning
         annotations:
           summary: "P99 latency exceeds 100ms for 3 minutes"
+
+      - uid: grpc-elevated-latency-p95
+        title: "gRPC Elevated Latency P95"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.05]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "gRPC P95 latency exceeds 50ms for 3 minutes"
+
+      - uid: grpc-elevated-latency-p99
+        title: "gRPC Elevated Latency P99"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.1]
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "gRPC P99 latency exceeds 100ms for 3 minutes"
 
       - uid: cache-error-spike
         title: "Cache Error Spike"

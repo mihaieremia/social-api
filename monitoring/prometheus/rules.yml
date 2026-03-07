@@ -25,3 +25,22 @@ groups:
         expr: histogram_quantile(0.9, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[5m])))
       - record: social_api:external_call_duration:p99
         expr: histogram_quantile(0.99, sum by (le, service) (rate(social_api_external_call_duration_seconds_bucket[5m])))
+
+  - name: social_api_grpc_latency
+    interval: 5s
+    rules:
+      # Global gRPC latency quantiles
+      - record: social_api:grpc_request_duration:p50
+        expr: histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+      - record: social_api:grpc_request_duration:p90
+        expr: histogram_quantile(0.9, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+      - record: social_api:grpc_request_duration:p99
+        expr: histogram_quantile(0.99, sum(rate(social_api_grpc_request_duration_seconds_bucket[5m])) by (le))
+
+      # Per-method gRPC latency quantiles
+      - record: social_api:grpc_request_duration_by_method:p50
+        expr: histogram_quantile(0.5, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
+      - record: social_api:grpc_request_duration_by_method:p90
+        expr: histogram_quantile(0.9, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
+      - record: social_api:grpc_request_duration_by_method:p99
+        expr: histogram_quantile(0.99, sum by (le, method) (rate(social_api_grpc_request_duration_seconds_bucket[5m])))
