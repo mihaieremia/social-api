@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared test infrastructure for in-process axum tests.
 //!
 //! `TestApp::new()` spins up real Postgres and Redis via testcontainers,
