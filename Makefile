@@ -6,6 +6,7 @@
         build check fmt lint \
         test test-unit test-unit-fast test-integration test-all \
         k6-load k6-load-read k6-load-batch k6-load-write k6-load-mixed k6-load-parallel k6-load-sse \
+        k6-grpc k6-grpc-read k6-grpc-batch k6-grpc-write k6-grpc-mixed k6-grpc-parallel k6-grpc-health \
         k6-stress k6-spike k6-soak k6-breakpoint k6-tune-macos \
         up down build-docker logs \
         db-reset migrate sqlx-prepare \
@@ -18,6 +19,7 @@
 # ---------------------------------------------------------------------------
 
 BASE_URL        ?= http://localhost:8080
+GRPC_HOST       ?= localhost:50051
 TARGET_RPS      ?= 15000
 STRESS_DURATION ?= 30m
 COMPOSE         := docker compose
@@ -40,6 +42,9 @@ help: ## Show this help message
 	@echo "  K6 — LOAD (sequential scenario suite)"
 	@awk 'BEGIN{FS=":.*##"} /^k6-load.*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
+	@echo "  K6 — gRPC LOAD (sequential scenario suite)"
+	@awk 'BEGIN{FS=":.*##"} /^k6-grpc.*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ""
 	@echo "  K6 — STRESS STRATEGIES"
 	@awk 'BEGIN{FS=":.*##"} /^k6-(stress|spike|soak|breakpoint).*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
@@ -58,7 +63,7 @@ help: ## Show this help message
 	@echo "  SETUP"
 	@awk 'BEGIN{FS=":.*##"} /^setup.*:.*##/{printf "    make %-28s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "  Overridable vars: BASE_URL=$(BASE_URL)  TARGET_RPS=$(TARGET_RPS)  STRESS_DURATION=$(STRESS_DURATION)"
+	@echo "  Overridable vars: BASE_URL=$(BASE_URL)  GRPC_HOST=$(GRPC_HOST)  TARGET_RPS=$(TARGET_RPS)  STRESS_DURATION=$(STRESS_DURATION)"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -134,6 +139,31 @@ k6-load-parallel: ## Load: all scenarios running simultaneously
 
 k6-load-sse: ## Load: SSE connection stress (ramp 0→200 connections)
 	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=sse_stress k6/load_test.js
+
+# ---------------------------------------------------------------------------
+# K6 — gRPC load test (sequential, individual scenarios)
+# ---------------------------------------------------------------------------
+
+k6-grpc: ## Run the full sequential gRPC load suite (all scenarios in order)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) k6/grpc_load_test.js
+
+k6-grpc-read: ## gRPC load: isolated read path (10k rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_read k6/grpc_load_test.js
+
+k6-grpc-batch: ## gRPC load: isolated batch counts (1k rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_batch k6/grpc_load_test.js
+
+k6-grpc-write: ## gRPC load: isolated write path like/unlike (500 rps, 60s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_write k6/grpc_load_test.js
+
+k6-grpc-mixed: ## gRPC load: mixed 80/15/5 workload (2k rps, 120s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=grpc_mixed k6/grpc_load_test.js
+
+k6-grpc-parallel: ## gRPC load: all scenarios running simultaneously
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=parallel k6/grpc_load_test.js
+
+k6-grpc-health: ## gRPC load: health check only (100 rps, 30s)
+	k6 run -e GRPC_HOST=$(GRPC_HOST) -e K6_SCENARIO=health k6/grpc_load_test.js
 
 # ---------------------------------------------------------------------------
 # K6 — Stress strategies

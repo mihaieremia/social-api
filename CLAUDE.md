@@ -19,8 +19,7 @@ social-api/                      # Root
 ├── docker-compose.yml
 ├── Dockerfile                   # Multi-stage (social-api)
 ├── Dockerfile.mock              # Multi-stage (mock-services)
-├── k6/                          # Load tests (bonus)
-└── proto/                       # gRPC definitions (bonus)
+└── k6/                          # Load tests
 ```
 
 ### Module Structure (crates/social-api/src/)
@@ -53,6 +52,7 @@ middleware/
 
 services/
   like_service.rs                # ALL business logic: like, unlike, count, status, batch, leaderboard, cursor pagination
+  pubsub_manager.rs              # Redis Pub/Sub subscription manager for SSE fan-out
 
 repositories/
   like_repository.rs             # ALL SQL: insert_like, delete_like, get_count, get_status, get_user_likes, get_leaderboard
@@ -64,9 +64,11 @@ clients/
   content_client.rs              # ContentValidator trait + HttpContentValidator
   profile_client.rs              # TokenValidator trait + HttpTokenValidator
   circuit_breaker.rs             # Generic state machine (Closed/HalfOpen/Open)
+  metrics.rs                     # Helpers for recording external call metrics
 
 tasks/
   leaderboard_refresh.rs         # Periodic ZSET rebuild; also warms cache on startup
+  db_pool_metrics.rs             # Periodic DB pool gauge emission
 
 shared crate (crates/shared/src/):
   types.rs                       # All domain types: AuthenticatedUser, TimeWindow, Like, LikeEvent, request/response structs
@@ -123,7 +125,7 @@ CREATE TABLE like_counts (
 
 | Key Pattern | Type | TTL | Purpose |
 |---|---|---|---|
-| `lc:{type}:{id}` | STRING | 300s | Like count (conditional INCR/DECR via Lua) |
+| `lc:{type}:{id}` | STRING | 300s | Like count (write-through on mutations, cache-aside on reads) |
 | `cv:{type}:{id}` | STRING | 3600s valid, 60s invalid | Content validation cache |
 | `rl:w:{fnv1a_hash(token)}` | ZSET | window+10s | Write rate limit (30/min sliding window) |
 | `rl:r:{fnv1a_hash(ip)}` | ZSET | window+10s | Read rate limit (1000/min sliding window) |
@@ -131,7 +133,7 @@ CREATE TABLE like_counts (
 | `sse:{type}:{id}` | PUB/SUB | -- | SSE event channel |
 
 ### Stampede Protection
-Lock-based (SET NX with 5s TTL). On count cache miss: acquire lock, fetch from DB, populate cache, release. Losers wait 50ms and retry cache, then fallback to DB.
+Watch-channel coalescing via `DashMap<String, watch::Sender>`. On count cache miss: first task registers a `watch::Sender` in `pending_fetches` and queries DB; concurrent tasks subscribe to the same sender and receive the result instantly. If the fetcher fails, waiters fall back to DB directly.
 
 ### Cache Warming
 On startup: leaderboard refresh task runs immediately before entering the periodic loop, populating `lb:{window}` ZSETs for all time windows (24h, 7d, 30d, all). Like counts use lazy population (cache-aside on first access).
@@ -162,7 +164,7 @@ Encodes `{"t":"2026-02-02T17:00:00Z","id":12345}` as base64url. Query uses `WHER
 5. **Cache graceful degradation:** Redis failures return None, never propagate errors to caller. Service continues with degraded performance.
 6. **No unwrap/expect in production code.** Use `?` operator and proper error propagation.
 7. **Structured logging:** Every log line: timestamp, level, message, request_id, service. Requests: method, path, status, latency_ms. External calls: service, method, latency_ms, success.
-8. **SQL via SQLx:** Compile-time checked queries. Writer pool for mutations, reader pool for reads.
+8. **SQL via SQLx:** Runtime queries (`sqlx::query` / `sqlx::query_as`, not compile-time macros — avoids requiring a live DB at build time). Writer pool for mutations, reader pool for reads.
 9. **Atomic count updates:** Like/unlike wraps INSERT/DELETE + count UPDATE in a single transaction.
 10. **Rate limiting via Lua script:** ZREMRANGEBYSCORE + ZCARD + ZADD in atomic Redis script for sliding window correctness.
 
@@ -186,4 +188,4 @@ Encodes `{"t":"2026-02-02T17:00:00Z","id":12345}` as base64url. Query uses `WHER
 
 - **Dockerfile:** Multi-stage (rust:latest builder -> debian:trixie-slim). Non-root user. HEALTHCHECK.
 - **docker-compose.yml:** social-api, postgres:16, redis:7-alpine, mock-services (one binary on port 8081 serves all content APIs and profile API). depends_on with health checks.
-- **`docker compose up --build`** starts everything.
+- **`make up`** starts everything (`make help` for all commands).

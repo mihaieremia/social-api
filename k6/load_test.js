@@ -246,13 +246,14 @@ const PARALLEL_SCENARIOS = {
 // Run with: K6_SCENARIO=sse_stress k6 run k6/load_test.js
 
 const SSE_STRESS_SCENARIOS = {
-  // Background writes to generate real SSE events
+  // Background writes to generate real SSE events.
+  // Duration covers the full SSE ramp cycle (15+45+15+45+15+45+15 = 195s).
   sse_stress_writes: {
     executor: 'constant-arrival-rate',
     exec: 'writeCycle',
     rate: 200,
     timeUnit: '1s',
-    duration: '120s',
+    duration: '195s',
     preAllocatedVUs: 30,
     maxVUs: 60,
     gracefulStop: '10s',
@@ -260,21 +261,23 @@ const SSE_STRESS_SCENARIOS = {
   },
 
   // SSE connections: ramp 0 -> 500 -> 1000 -> 2000, hold, drain
+  // Each VU holds a 35s SSE connection. gracefulRampDown/Stop must exceed
+  // that so in-flight connections can finish without being force-killed.
   sse_stress_connections: {
     executor: 'ramping-vus',
     exec: 'sseSubscribe',
     startVUs: 0,
     stages: [
       { duration: '15s', target: 500 },
-      { duration: '30s', target: 500 },
+      { duration: '45s', target: 500 },
       { duration: '15s', target: 1000 },
-      { duration: '30s', target: 1000 },
+      { duration: '45s', target: 1000 },
       { duration: '15s', target: 2000 },
-      { duration: '30s', target: 2000 },
+      { duration: '45s', target: 2000 },
       { duration: '15s', target: 0 },
     ],
-    gracefulRampDown: '15s',
-    gracefulStop: '10s',
+    gracefulRampDown: '40s',
+    gracefulStop: '40s',
     tags: { scenario: 'sse_stress_connections' },
   },
 };
@@ -449,19 +452,27 @@ export function mixedWorkload() {
 // k6's http.get() blocks until timeout, which is exactly what we want —
 // each VU holds one SSE connection for the timeout period.
 // The real metric is social_api_sse_connections_active in Grafana.
+//
+// Timeout vs heartbeat:
+//   Server heartbeat interval = 10s (SSE_HEARTBEAT_INTERVAL_SECS).
+//   k6 timeout = 35s → guarantees at least 2-3 heartbeats per connection.
+//   k6 reports "request timeout" warnings when the timeout fires — this is
+//   expected for SSE and NOT an error. The timeout is the mechanism for
+//   cycling connections during the stress test.
 export function sseSubscribe() {
   const { content_type, content_id } = randomContent();
   const url = `${BASE_URL}/v1/likes/stream?content_type=${content_type}&content_id=${content_id}`;
 
-  // Hold the connection open for 20s (k6 will read the streaming body until timeout)
+  // Hold the connection open for 35s — outlives at least 2 server heartbeats (10s each).
+  // k6 will log "request timeout" when this fires; that's expected for SSE streams.
   const res = http.get(url, {
     tags: { name: 'GET_sse_stream' },
-    timeout: '20s',
+    timeout: '35s',
     responseType: 'text',
   });
 
   // k6 sets status=0 on timeout for streaming responses, so check body instead.
-  // The server sends heartbeats every 30s, so we should get at least the headers.
+  // With 10s heartbeat interval and 35s timeout, we should always get heartbeats.
   check(res, {
     'sse: received heartbeat or event': (r) =>
       r.body && r.body.includes('event'),

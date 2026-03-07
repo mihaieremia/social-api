@@ -74,49 +74,43 @@ pub async fn insert_like(
             })
         }
         None => {
-            // Already existed — fetch the existing row and current count.
-            //
-            // Race condition: a concurrent unlike may have deleted the row between
-            // our INSERT ON CONFLICT (which saw it) and this SELECT. Use
-            // fetch_optional + fallback to avoid "no rows returned" 500 errors.
-            let count: i64 = sqlx::query_scalar(
+            // Already existed — fetch existing row + count in a single query
+            // inside the transaction. Eliminates the race window where a
+            // concurrent unlike could delete the row between queries.
+            let existing: Option<(i64, String, Uuid, DateTime<Utc>, i64)> = sqlx::query_as(
                 r#"
-                SELECT COALESCE(total_count, 0) FROM like_counts
-                WHERE content_type = $1 AND content_id = $2
-                "#,
-            )
-            .bind(content_type)
-            .bind(content_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .unwrap_or(0);
-
-            tx.commit().await?;
-
-            let existing = sqlx::query_as::<_, LikeRow>(
-                r#"
-                SELECT id, content_type, content_id, created_at
-                FROM likes
-                WHERE user_id = $1 AND content_type = $2 AND content_id = $3
+                SELECT l.id, l.content_type, l.content_id, l.created_at,
+                       COALESCE(lc.total_count, 0)
+                FROM likes l
+                LEFT JOIN like_counts lc
+                    ON lc.content_type = l.content_type AND lc.content_id = l.content_id
+                WHERE l.user_id = $1 AND l.content_type = $2 AND l.content_id = $3
                 "#,
             )
             .bind(user_id)
             .bind(content_type)
             .bind(content_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?;
 
+            tx.commit().await?;
+
             match existing {
-                Some(row) => Ok(InsertLikeResult {
-                    row,
+                Some((id, ct, cid, created_at, count)) => Ok(InsertLikeResult {
+                    row: LikeRow {
+                        id,
+                        content_type: ct,
+                        content_id: cid,
+                        created_at,
+                    },
                     already_existed: true,
                     count,
                 }),
                 None => {
                     // Row was deleted by a concurrent unlike between our INSERT
-                    // check and this SELECT. Treat as a new like and retry.
-                    // Create a synthetic row — the like no longer exists, so
-                    // this is effectively a no-op "already existed" response.
+                    // ON CONFLICT check and this SELECT (within the same tx,
+                    // so this is an extremely narrow window). Return a no-op
+                    // "already existed" response with count 0.
                     Ok(InsertLikeResult {
                         row: LikeRow {
                             id: 0,
@@ -125,7 +119,7 @@ pub async fn insert_like(
                             created_at: chrono::Utc::now(),
                         },
                         already_existed: true,
-                        count,
+                        count: 0,
                     })
                 }
             }

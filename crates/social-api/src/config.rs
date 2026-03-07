@@ -26,6 +26,10 @@ pub struct Config {
     pub db_acquire_timeout_secs: u64,
 
     // Redis pool
+    // Sizing formula: connections = target_ops_per_sec * avg_rt_ms / 1000
+    // Example: 100k ops/sec * 0.5ms / 1000 = 50 connections
+    // Redis is single-threaded — excess connections waste TCP sockets and
+    // connection buffer memory without increasing throughput.
     pub redis_pool_size: u32,
 
     // Rate limiting
@@ -146,7 +150,7 @@ impl Config {
             ),
             server_concurrency_limit: env_or_default("SERVER_CONCURRENCY_LIMIT", 10000),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
-            sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 15),
+            sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 10),
             sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 128),
             leaderboard_refresh_interval_secs: env_or_default(
                 "LEADERBOARD_REFRESH_INTERVAL_SECS",
@@ -210,7 +214,7 @@ impl Config {
             leaderboard_refresh_interval_secs: 300,
             server_concurrency_limit: 10000,
             shutdown_timeout_secs: 30,
-            sse_heartbeat_interval_secs: 15,
+            sse_heartbeat_interval_secs: 10,
             sse_broadcast_capacity: 128,
             log_level: "info".to_string(),
         }

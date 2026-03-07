@@ -68,6 +68,7 @@ pub async fn create_pool(config: &Config) -> Result<RedisPool, Box<dyn std::erro
         .max_size(config.redis_pool_size)
         .min_idle(Some(1))
         .connection_timeout(Duration::from_secs(3))
+        .idle_timeout(Some(Duration::from_secs(300)))
         .build(manager)
         .await?;
 

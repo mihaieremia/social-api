@@ -4,7 +4,7 @@ FROM rust:1.90 AS builder
 WORKDIR /app
 
 # Install protobuf compiler (required by tonic-build)
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./

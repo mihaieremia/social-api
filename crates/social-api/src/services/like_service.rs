@@ -232,23 +232,33 @@ impl LikeService {
         let (tx, _rx) = watch::channel(None::<i64>);
         self.pending_fetches.insert(cache_key.clone(), tx.clone());
 
-        let count = like_repository::get_count(&self.db.reader, content_type, content_id)
-            .await
-            .map_err(Self::db_err)?;
+        let result = like_repository::get_count(&self.db.reader, content_type, content_id).await;
 
-        self.cache
-            .set(
-                &cache_key,
-                &count.to_string(),
-                self.config.cache_ttl_like_counts_secs,
-            )
-            .await;
+        // Always clean up the DashMap entry — on success AND failure.
+        // Without this, a failed fetch leaves a stale entry with a dead sender,
+        // wasting memory until overwritten by a future insert().
+        match result {
+            Ok(count) => {
+                self.cache
+                    .set(
+                        &cache_key,
+                        &count.to_string(),
+                        self.config.cache_ttl_like_counts_secs,
+                    )
+                    .await;
 
-        // Wake all waiters immediately with the fetched count.
-        tx.send(Some(count)).ok();
-        self.pending_fetches.remove(&cache_key);
-
-        Ok(count)
+                // Wake all waiters immediately with the fetched count.
+                tx.send(Some(count)).ok();
+                self.pending_fetches.remove(&cache_key);
+                Ok(count)
+            }
+            Err(e) => {
+                // Clean up before propagating — waiters see the sender drop
+                // and fall back to DB directly.
+                self.pending_fetches.remove(&cache_key);
+                Err(Self::db_err(e))
+            }
+        }
     }
 
     /// Get like status for a user on a content item.
