@@ -18,7 +18,7 @@ use crate::repositories::like_repository;
 pub struct LikeService {
     db: DbPools,
     cache: CacheManager,
-    /// Trait object — swappable transport (HTTP today, gRPC tomorrow).
+    /// Trait object — swappable transport (HTTP or gRPC via INTERNAL_TRANSPORT).
     content_validator: Arc<dyn ContentValidator>,
     config: Config,
     content_breaker: Arc<CircuitBreaker>,
@@ -79,36 +79,18 @@ impl LikeService {
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
-        // Insert first to determine if this is a new or duplicate request.
-        // Duplicate detection must happen before content validation so we can
-        // skip the external HTTP call for requests we've already processed.
+        // Validate content exists BEFORE inserting.
+        // This prevents a race where a concurrent duplicate request could observe
+        // an unvalidated row and return success before this request rolls it back.
+        self.validate_content(content_type, content_id).await?;
+
+        // Now insert — content is known-valid. Duplicate detection is safe because
+        // any existing row was validated on its original insert.
         let result =
             like_repository::insert_like(&self.db.writer, user_id, content_type, content_id)
                 .await
                 .map_err(Self::db_err)?;
 
-        if !result.already_existed {
-            // Content validation is skipped for duplicate likes.
-            // Rationale: if this like already exists, the content was valid at the time it was
-            // first created. Re-validating on every duplicate request would fire a redundant
-            // external HTTP round-trip with no correctness benefit.
-            //
-            // On validation failure for a NEW like: undo the insert so the DB stays consistent.
-            // Best-effort rollback — if delete_like also fails, the orphaned row will have
-            // count=1 with no valid content. Acceptable: content APIs are expected to be available.
-            if let Err(e) = self.validate_content(content_type, content_id).await {
-                let _ = like_repository::delete_like(
-                    &self.db.writer,
-                    user_id,
-                    content_type,
-                    content_id,
-                )
-                .await;
-                return Err(e);
-            }
-        }
-
-        // Use the authoritative count from the write transaction.
         // Use the authoritative count from the write transaction to avoid
         // races where a concurrent request reads a stale count from the reader.
         let count = result.count;
@@ -147,6 +129,9 @@ impl LikeService {
         content_type: &str,
         content_id: Uuid,
     ) -> Result<LikeActionResponse, AppError> {
+        // Validate content exists — spec requires same validation chain as like.
+        self.validate_content(content_type, content_id).await?;
+
         let result =
             like_repository::delete_like(&self.db.writer, user_id, content_type, content_id)
                 .await
@@ -200,11 +185,8 @@ impl LikeService {
 
     /// Internal count getter with cache-first strategy and stampede protection.
     ///
-    /// On a cache miss, the first task to notice registers a `watch::Sender` in
-    /// `pending_fetches` and fetches from DB. Every concurrent waiter subscribes
-    /// to that sender and is woken immediately when the result is ready — no
-    /// fixed sleep delay. If the fetcher fails, the sender drops, waiters
-    /// receive `Err` on `changed()` and fall back to DB directly.
+    /// Uses a `watch::Sender` to coalesce concurrent cache misses into a single DB query.
+    /// Waiters are woken immediately when the fetcher completes.
     async fn get_count_inner(&self, content_type: &str, content_id: Uuid) -> Result<i64, AppError> {
         let cache_key = count_cache_key(content_type, content_id);
 

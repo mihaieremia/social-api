@@ -4,7 +4,7 @@
 
 - [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) installed (`brew install k6` on macOS)
 - Docker services running: `docker compose up --build -d`
-- Wait for healthy: `docker compose ps` (all 4 services should show "healthy")
+- Wait for healthy: `docker compose ps` (all services should show "healthy")
 
 ## Run All Scenarios (Sequential)
 
@@ -48,7 +48,7 @@ k6 run -e BASE_URL=http://your-host:9080 k6/load_test.js
 
 | Scenario   | Rate       | p99 Target |
 |------------|------------|------------|
-| read_path  | 10,000 rps | < 10ms     |
+| read_path  | 10,000 rps | < 5ms      |
 | batch_path | 1,000 rps  | < 50ms     |
 | write_path | 500 rps    | < 100ms    |
 | mixed      | 2,000 rps  | < 100ms    |
@@ -78,7 +78,7 @@ All 5 thresholds passed. Zero failures across 929,991 requests.
 
 | Threshold | Target | Actual | Status |
 |-----------|--------|--------|--------|
-| read_path p99 | < 10ms | 1.45ms | PASS |
+| read_path p99 | < 5ms | 1.45ms | PASS |
 | batch_path p99 | < 50ms | 2.01ms | PASS |
 | write_path p99 | < 100ms | 2.39ms | PASS |
 | mixed p99 | < 100ms | 1.63ms | PASS |
@@ -111,4 +111,4 @@ All 5 thresholds passed. Zero failures across 929,991 requests.
 - Uses `constant-arrival-rate` executor to guarantee exact rps regardless of response time.
 - Write path alternates like/unlike to generate real DB writes every request.
 - Mock data: 20 users x 20 content IDs x 3 types = 1,200 unique combinations.
-- Running on Docker (single machine) will likely not hit 10k rps p99 < 10ms. These thresholds are designed for production or dedicated load testing infrastructure.
+- Running on Docker (single machine) will likely not hit 10k rps p99 < 5ms. These thresholds are designed for production or dedicated load testing infrastructure.

@@ -21,7 +21,7 @@ use crate::state::AppState;
 /// Access log verbosity level (set via `ACCESS_LOG` env var).
 ///
 /// - `full`: log every request at INFO (development / low-traffic).
-/// - `errors`: log only 4xx/5xx or requests slower than 500ms (production default).
+/// - `errors`: log only 4xx/5xx or requests slower than 2000ms (production default).
 /// - `none`: suppress all per-request logs; rely on Prometheus metrics only.
 #[derive(Clone, Copy, PartialEq)]
 pub enum AccessLogLevel {
@@ -137,7 +137,7 @@ pub fn build_router(state: AppState, metrics_handle: PrometheusHandle) -> Router
             middleware::rate_limit::write_rate_limit,
         ));
 
-    // Read routes (GET) — per-IP read rate limit
+    // Read routes (GET + batch POST) — per-IP read rate limit
     let read_routes = Router::new()
         .route(
             "/v1/likes/{content_type}/{content_id}/count",

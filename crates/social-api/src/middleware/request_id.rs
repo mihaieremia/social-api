@@ -9,7 +9,7 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate a fast, unique-enough request ID without entropy syscalls.
-/// Format: `req_{hex_timestamp}_{hex_counter}` — sortable and collision-free
+/// Format: `req_{hex_timestamp}-{hex_counter}` — sortable and collision-free
 /// within a single process. For cross-replica uniqueness, add a replica ID prefix.
 pub fn fast_request_id() -> String {
     let ts = std::time::SystemTime::now()

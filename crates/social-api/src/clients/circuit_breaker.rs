@@ -51,9 +51,8 @@ struct CallRecord {
 
 /// All mutable circuit breaker state under a single lock.
 ///
-/// Using one `Mutex<Inner>` instead of multiple separate `RwLock`/`Atomic`
-/// primitives eliminates TOCTOU races where threads could interleave reads
-/// and writes across separate locks.
+/// Using one `Mutex<Inner>` prevents TOCTOU races by ensuring state transitions
+/// and checks happen atomically.
 struct Inner {
     state: CircuitState,
     consecutive_failures: u32,
@@ -95,9 +94,7 @@ impl CircuitBreaker {
 
     /// Check if the circuit allows a request.
     ///
-    /// The entire check-and-transition is performed under one lock hold,
-    /// eliminating the TOCTOU race that existed when state was read under a
-    /// read lock and then transitioned under a separate write lock.
+    /// The entire check-and-transition is performed atomically under one lock hold.
     pub fn allow_request(&self) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match inner.state {

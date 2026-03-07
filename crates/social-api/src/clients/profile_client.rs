@@ -88,6 +88,15 @@ impl TokenValidator for HttpTokenValidator {
             }
         };
 
+        if response.status().is_server_error() {
+            tracing::error!(
+                service = "profile_api",
+                status = response.status().as_u16(),
+                "Profile API returned server error"
+            );
+            return Err(AppError::DependencyUnavailable("profile_api".to_string()));
+        }
+
         if !response.status().is_success() {
             return Err(AppError::Unauthorized(
                 "Invalid or expired token".to_string(),

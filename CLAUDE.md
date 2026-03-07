@@ -27,7 +27,7 @@ social-api/                      # Root
 main.rs                          # Entry: config, pools, server, shutdown
 config.rs                        # Env-based config with fail-fast
 server.rs                        # Axum Router + middleware layers
-state.rs                         # AppState (Arc<AppStateInner>: db, cache, config, http_client, like_service, token_validator, profile_breaker, shutdown_token, inflight_count)
+state.rs                         # AppState (Arc<AppStateInner>: db, cache, config, http_client, like_service, token_validator, profile_breaker, pubsub_manager, shutdown_token, inflight_count)
 shutdown.rs                      # SIGTERM handler, drain, SSE close
 db.rs                            # DbPools (writer + reader PgPool)
 logging.rs                       # JSON tracing-subscriber init
@@ -60,10 +60,16 @@ repositories/
 cache/
   manager.rs                     # CacheManager: get/set/mget/publish/zrevrange/replace_sorted_set/invoke_script
 
+grpc/
+  mod.rs                         # gRPC transport implementations
+  proto.rs                       # Compiled protobuf code for internal services
+
 clients/
   content_client.rs              # ContentValidator trait + HttpContentValidator
   profile_client.rs              # TokenValidator trait + HttpTokenValidator
   circuit_breaker.rs             # Generic state machine (Closed/HalfOpen/Open)
+  grpc_profile_client.rs         # GrpcTokenValidator (tonic)
+  grpc_content_client.rs         # GrpcContentValidator (tonic)
   metrics.rs                     # Helpers for recording external call metrics
 
 tasks/
@@ -127,7 +133,7 @@ CREATE TABLE like_counts (
 |---|---|---|---|
 | `lc:{type}:{id}` | STRING | 300s | Like count (write-through on mutations, cache-aside on reads) |
 | `cv:{type}:{id}` | STRING | 3600s valid, 60s invalid | Content validation cache |
-| `rl:w:{fnv1a_hash(token)}` | ZSET | window+10s | Write rate limit (30/min sliding window) |
+| `rl:w:{fnv1a_hash(authorization_header)}` | ZSET | window+10s | Write rate limit (30/min sliding window) |
 | `rl:r:{fnv1a_hash(ip)}` | ZSET | window+10s | Read rate limit (1000/min sliding window) |
 | `lb:{window}` | ZSET | no TTL | Global leaderboard per window (score=count, member="{type}:{id}"); content_type filter in app |
 | `sse:{type}:{id}` | PUB/SUB | -- | SSE event channel |
@@ -141,7 +147,7 @@ On startup: leaderboard refresh task runs immediately before entering the period
 ## Key Traits (Extensibility)
 
 ```rust
-// Transport-swappable (HTTP today, gRPC tomorrow)
+// Transport-swappable (HTTP and gRPC, selected via INTERNAL_TRANSPORT env var)
 #[async_trait]
 pub trait ContentValidator: Send + Sync { ... }
 #[async_trait]

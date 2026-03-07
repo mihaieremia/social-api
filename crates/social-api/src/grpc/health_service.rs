@@ -1,7 +1,7 @@
 //! gRPC health check service implementation.
 //!
 //! Implements `social.v1.Health.Check` with database and Redis dependency
-//! checks, matching the HTTP `/health/ready` endpoint behavior.
+//! checks. Note: unlike HTTP `/health/ready`, this does NOT check content APIs.
 
 use std::collections::HashMap;
 

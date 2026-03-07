@@ -87,13 +87,18 @@ lint: ## Run Clippy with deny-warnings
 # ---------------------------------------------------------------------------
 
 test-unit: ## Run unit tests — real infra via testcontainers (requires Docker)
-	cargo test --workspace --bins
+	cargo test --workspace --lib --bins
 
 test-unit-fast: ## Run only pure unit tests — no containers, no Docker needed
-	cargo test --workspace --bins \
+	cargo test --workspace --lib --bins \
 	  -- --skip services::like_service::tests \
 	     --skip repositories::like_repository::tests \
-	     --skip middleware::rate_limit::tests::test_sliding_window
+	     --skip middleware::rate_limit::tests::test_sliding_window \
+	     --skip cache::manager::tests \
+	     --skip state::tests \
+	     --skip tasks::leaderboard_refresh::tests \
+	     --skip tasks::db_pool_metrics::tests \
+	     --skip services::pubsub_manager::tests
 
 test-integration: ## Run integration tests (requires full stack: make up)
 	cargo test --workspace --test '*' -- --ignored --test-threads=1 \
@@ -122,7 +127,7 @@ test-all: test-unit test-integration ## Run all tests (unit + integration)
 k6-load: ## Run the full sequential load suite (all scenarios in order)
 	k6 run -e BASE_URL=$(BASE_URL) k6/load_test.js
 
-k6-load-read: ## Load: isolated read path (8k rps, 60s)
+k6-load-read: ## Load: isolated read path (10k rps, 60s)
 	k6 run -e BASE_URL=$(BASE_URL) -e K6_SCENARIO=read_path k6/load_test.js
 
 k6-load-batch: ## Load: isolated batch counts (500 rps, 60s)

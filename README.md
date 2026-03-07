@@ -40,13 +40,16 @@ Run `make` or `make help` to see all available commands.
 | GET | `/health/live`, `/health/ready` | No | Health probes |
 | GET | `/metrics` | No | Prometheus metrics |
 
+### internal gRPC Interface
+Available on `GRPC_PORT` (default 50051). Supports high-performance inter-service communication for internal APIs.
+
 Full OpenAPI spec at `/api-docs/openapi.json`.
 
 ## Testing
 
 ```bash
-make test               # Fast unit tests — no Docker needed
-make test-unit          # All unit tests — uses testcontainers (needs Docker daemon)
+make test               # Pure unit tests (no containers) — no Docker needed
+make test-unit          # All unit tests (lib + bin) — uses testcontainers (needs Docker daemon)
 make test-integration   # Integration tests — requires make up first
 make test-all           # Unit + integration
 make coverage           # Unit + http coverage report (needs Docker daemon)
@@ -59,7 +62,7 @@ Requires [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) (`brew inst
 
 ```bash
 make k6-load            # Full sequential suite (~6 min)
-make k6-load-read       # Read path only (8k rps)
+make k6-load-read       # Read path only (10k rps)
 make k6-load-write      # Write path only (500 rps)
 make k6-load-mixed      # Mixed 80/15/5 workload (2k rps)
 make k6-stress          # Ramp to TARGET_RPS, sustained
@@ -77,8 +80,13 @@ All via environment variables. See [.env.example](.env.example) for the full lis
 Required:
 ```
 DATABASE_URL, READ_DATABASE_URL, REDIS_URL, HTTP_PORT
-CONTENT_API_POST_URL, CONTENT_API_BONUS_HUNTER_URL, CONTENT_API_TOP_PICKS_URL
 PROFILE_API_URL
+At least one CONTENT_API_{TYPE}_URL (e.g., CONTENT_API_POST_URL)
+```
+
+Optional:
+```
+INTERNAL_TRANSPORT (http|grpc), GRPC_PORT
 ```
 
 Adding a new content type requires only a `CONTENT_API_{TYPE}_URL` env var.
@@ -102,7 +110,7 @@ social-api/
 ├── migrations/              # SQLx migrations
 ├── k6/                      # Load tests
 ├── monitoring/              # Grafana dashboards, Prometheus config, alert rules
-└── docs/                    # Design docs
+└── docker-compose.yml       # Dev stack (Postgres, Redis, mock APIs, observability)
 ```
 
 Key design choices:

@@ -1,7 +1,6 @@
 /// Record metrics for an external service call (counter + histogram).
 ///
-/// `service` and `method` are `&'static str` (always literals) to avoid heap
-/// allocation — `SharedString` implements `From<&'static str>` zero-copy.
+/// `service` and `method` are `&'static str` (always literals).
 /// `status` is `String` because HTTP status codes are formatted at runtime.
 pub(crate) fn record_external_call(
     service: &'static str,

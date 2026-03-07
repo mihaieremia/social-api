@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::cache::manager::CacheManager;
 use crate::config::Config;
 
-/// Trait for content validation — transport-swappable (HTTP today, gRPC tomorrow).
+/// Trait for content validation — transport-swappable (HTTP or gRPC via INTERNAL_TRANSPORT).
 #[async_trait::async_trait]
 pub trait ContentValidator: Send + Sync {
     /// Check if content exists. Returns Ok(true) if valid, Ok(false) if not found.
@@ -86,26 +86,46 @@ impl ContentValidator for HttpContentValidator {
             }
         };
 
-        let valid = response.status().is_success();
+        let status = response.status();
 
-        // Cache result (valid=3600s, invalid=60s to allow retry)
-        let ttl = if valid {
-            self.config.cache_ttl_content_validation_secs
+        if status.is_success() {
+            // Content exists — cache as valid
+            self.cache
+                .set(
+                    &cache_key,
+                    "1",
+                    self.config.cache_ttl_content_validation_secs,
+                )
+                .await;
+            tracing::debug!(
+                service = "content_api",
+                content_type = content_type,
+                content_id = %content_id,
+                valid = true,
+                "Content validation result"
+            );
+            Ok(true)
+        } else if status.is_server_error() {
+            // 5xx — upstream failure, propagate as dependency error (do NOT cache)
+            tracing::error!(
+                service = "content_api",
+                content_type = content_type,
+                content_id = %content_id,
+                status = status.as_u16(),
+                "Content API returned server error"
+            );
+            Err(AppError::DependencyUnavailable("content_api".to_string()))
         } else {
-            60
-        };
-        self.cache
-            .set(&cache_key, if valid { "1" } else { "0" }, ttl)
-            .await;
-
-        tracing::debug!(
-            service = "content_api",
-            content_type = content_type,
-            content_id = %content_id,
-            valid = valid,
-            "Content validation result"
-        );
-
-        Ok(valid)
+            // 4xx (including 404) — content not found, cache briefly to avoid hammering
+            self.cache.set(&cache_key, "0", 60).await;
+            tracing::debug!(
+                service = "content_api",
+                content_type = content_type,
+                content_id = %content_id,
+                valid = false,
+                "Content validation result"
+            );
+            Ok(false)
+        }
     }
 }

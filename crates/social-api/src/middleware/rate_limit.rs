@@ -202,8 +202,8 @@ pub async fn write_rate_limit(
 /// Extract the real client IP for rate limiting.
 ///
 /// Uses the RIGHTMOST value in X-Forwarded-For — the address appended by the
-/// last trusted proxy (load balancer), which clients cannot forge. Falls back
-/// to X-Real-IP (set by nginx/envoy trusted proxies), then "unknown".
+/// last trusted proxy (load balancer). Assumes deployment behind a trusted
+/// reverse proxy that sets this header. Falls back to X-Real-IP, then "unknown".
 fn extract_real_ip(header_value: &str) -> &str {
     header_value
         .rsplit(',')

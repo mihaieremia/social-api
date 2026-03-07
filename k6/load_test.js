@@ -319,7 +319,7 @@ function buildThresholds() {
     };
   }
   return {
-    'http_req_duration{scenario:read_path}': ['p(99)<10'],
+    'http_req_duration{scenario:read_path}': ['p(99)<5'],
     'http_req_duration{scenario:batch_path}': ['p(99)<50'],
     'http_req_duration{scenario:write_path}': ['p(99)<100'],
     'http_req_duration{scenario:mixed}': ['p(99)<100'],
