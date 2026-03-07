@@ -159,6 +159,7 @@ impl TestApp {
     }
 
     /// Send a single request through the router using tower's `oneshot`.
+    #[allow(dead_code)]
     pub async fn request(&self, req: Request<Body>) -> axum::response::Response {
         self.router
             .clone()
@@ -196,6 +197,7 @@ impl ContentValidator for TestContentValidator {
 
 // ── Request builder helpers ──────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -205,6 +207,7 @@ pub fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn authed_json_request(
     method: &str,
     uri: &str,
@@ -220,6 +223,7 @@ pub fn authed_json_request(
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn get_request(uri: &str, user_id: Option<Uuid>) -> Request<Body> {
     let mut builder = Request::builder().method("GET").uri(uri);
     if let Some(id) = user_id {
@@ -229,6 +233,7 @@ pub fn get_request(uri: &str, user_id: Option<Uuid>) -> Request<Body> {
 }
 
 /// Collect the full response body and deserialize it as JSON.
+#[allow(dead_code)]
 pub async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
