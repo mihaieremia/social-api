@@ -5,7 +5,7 @@ use uuid::Uuid;
 /// Like record from the database.
 /// Note: `user_id` is intentionally not included — callers always know the
 /// user_id already (they pass it in). This avoids selecting an unused column.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct LikeRow {
     pub id: i64,
     pub content_type: String,

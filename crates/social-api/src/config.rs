@@ -88,6 +88,12 @@ pub struct Config {
     /// Token validation cache TTL. Used by HttpTokenValidator to cache
     /// authenticated user data in Redis, reducing Profile API round-trips.
     pub cache_ttl_user_status_secs: u64,
+    /// Per-user like status cache TTL (ls:{user}:{type}:{id} keys).
+    pub cache_ttl_like_status_secs: u64,
+    /// User likes first-page cache TTL (ul:{user}:{filter} keys).
+    pub cache_ttl_user_likes_secs: u64,
+    /// Filtered leaderboard cache TTL (lbf:{window}:{type}:{limit} keys).
+    pub cache_ttl_leaderboard_filtered_secs: u64,
 
     // Circuit breaker
     pub circuit_breaker_failure_threshold: u32,
@@ -115,6 +121,14 @@ pub struct Config {
 
     // Leaderboard
     pub leaderboard_refresh_interval_secs: u64,
+
+    // Local in-process cache (moka L1 in front of Redis)
+    /// TTL for the in-process L1 cache in milliseconds.
+    /// Short TTL (100-500ms) balances freshness with Redis load reduction.
+    pub local_cache_ttl_ms: u64,
+    /// Maximum number of entries in the L1 cache.
+    /// ~10k entries ≈ a few MB of memory.
+    pub local_cache_max_capacity: u64,
 
     // Logging
     pub log_level: String,
@@ -187,6 +201,12 @@ impl Config {
                 3600,
             ),
             cache_ttl_user_status_secs: env_or_default("CACHE_TTL_USER_STATUS_SECS", 60),
+            cache_ttl_like_status_secs: env_or_default("CACHE_TTL_LIKE_STATUS_SECS", 300),
+            cache_ttl_user_likes_secs: env_or_default("CACHE_TTL_USER_LIKES_SECS", 60),
+            cache_ttl_leaderboard_filtered_secs: env_or_default(
+                "CACHE_TTL_LEADERBOARD_FILTERED_SECS",
+                60,
+            ),
             circuit_breaker_failure_threshold: env_or_default(
                 "CIRCUIT_BREAKER_FAILURE_THRESHOLD",
                 5,
@@ -212,6 +232,8 @@ impl Config {
                 "LEADERBOARD_REFRESH_INTERVAL_SECS",
                 60,
             ),
+            local_cache_ttl_ms: env_or_default("LOCAL_CACHE_TTL_MS", 200),
+            local_cache_max_capacity: env_or_default("LOCAL_CACHE_MAX_CAPACITY", 10_000),
             log_level: std_env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
         }
     }
@@ -263,6 +285,9 @@ impl Config {
             cache_ttl_like_counts_secs: 300,
             cache_ttl_content_validation_secs: 3600,
             cache_ttl_user_status_secs: 60,
+            cache_ttl_like_status_secs: 300,
+            cache_ttl_user_likes_secs: 60,
+            cache_ttl_leaderboard_filtered_secs: 60,
             circuit_breaker_failure_threshold: 5,
             circuit_breaker_recovery_timeout_secs: 30,
             circuit_breaker_success_threshold: 2,
@@ -273,6 +298,8 @@ impl Config {
             shutdown_timeout_secs: 30,
             sse_heartbeat_interval_secs: 10,
             sse_broadcast_capacity: 128,
+            local_cache_ttl_ms: 200,
+            local_cache_max_capacity: 10_000,
             log_level: "info".to_string(),
         }
     }

@@ -53,6 +53,7 @@ utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 dashmap = "6"
+moka = { version = "0.12", features = ["future"] }
 
 # gRPC
 tonic = "0.13"

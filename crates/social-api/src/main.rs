@@ -57,7 +57,7 @@ async fn main() {
     let redis_pool = create_redis_pool(&config)
         .await
         .expect("Failed to initialize Redis pool");
-    let cache = CacheManager::new(redis_pool);
+    let cache = CacheManager::new(redis_pool, &config);
 
     let metrics_handle = middleware::metrics::init_metrics();
 

@@ -49,17 +49,23 @@ impl LikeService {
         config: Config,
         content_breaker: Arc<CircuitBreaker>,
     ) -> Self {
-        let count_cache = Arc::new(LikeCountCache::new(db.clone(), cache.clone(), config));
+        let count_cache = Arc::new(LikeCountCache::new(
+            db.clone(),
+            cache.clone(),
+            config.clone(),
+        ));
         let event_publisher = LikeEventPublisher::new(cache.clone());
 
         let commands = LikeCommandService::new(
             db.clone(),
+            cache.clone(),
+            config.clone(),
             content_validator,
             content_breaker.clone(),
             count_cache.clone(),
             event_publisher,
         );
-        let queries = LikeQueryService::new(db, cache.clone(), count_cache);
+        let queries = LikeQueryService::new(db, cache.clone(), count_cache, config);
 
         Self { commands, queries }
     }
@@ -188,7 +194,7 @@ mod tests {
         let redis_pool = crate::cache::create_pool(&config)
             .await
             .expect("redis pool");
-        let cache = crate::cache::CacheManager::new(redis_pool);
+        let cache = crate::cache::CacheManager::new(redis_pool, &config);
 
         let cb_config = crate::clients::circuit_breaker::CircuitBreakerConfig {
             failure_threshold: 100,

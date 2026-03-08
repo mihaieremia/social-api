@@ -256,7 +256,7 @@ mod tests {
         let redis_pool = crate::cache::create_pool(&config)
             .await
             .expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
+        let cache = CacheManager::new(redis_pool, &config);
 
         let shutdown_token = CancellationToken::new();
         let state = AppState::new(db, cache, config, shutdown_token).await;

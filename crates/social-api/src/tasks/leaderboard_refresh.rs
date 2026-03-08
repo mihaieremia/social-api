@@ -86,6 +86,11 @@ async fn refresh_all_windows(
             tracing::warn!(error = %e, "Failed to refresh leaderboard window");
         }
     }
+
+    // Invalidate L1 cache for filtered leaderboard queries (lbf:* keys).
+    // Redis keys expire via TTL (aligned with refresh interval).
+    cache.invalidate_l1_prefix("lbf:");
+
     Ok(())
 }
 
@@ -165,7 +170,7 @@ mod tests {
         let db = DbPools::from_config(&config).await.unwrap();
 
         let redis_pool = crate::cache::create_pool(&config).await.unwrap();
-        let cache = CacheManager::new(redis_pool);
+        let cache = CacheManager::new(redis_pool, &config);
 
         TestHarness {
             _scope: scope,

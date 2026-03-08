@@ -355,7 +355,7 @@ mod tests {
         let mut config = crate::config::Config::new_for_test();
         config.redis_url = scope.redis_url.clone();
         let pool = crate::cache::create_pool(&config).await.unwrap();
-        let cache = CacheManager::new(pool);
+        let cache = CacheManager::new(pool, &config);
         TestHarness {
             _scope: scope,
             cache,
@@ -400,7 +400,7 @@ mod tests {
             .build(manager)
             .await
             .unwrap();
-        let cache = CacheManager::new(pool);
+        let cache = CacheManager::new(pool, &config);
 
         let result = check_rate_limit_inner(&cache, "rl:test:failopen", 10, 60).await;
         // Must fail open (allow) — never drop legitimate traffic when Redis is down

@@ -145,6 +145,9 @@ CREATE TABLE like_counts (
 | `rl:w:{fnv1a_hash(authorization_header)}` | ZSET | window+10s | Write rate limit (30/min sliding window) |
 | `rl:r:{fnv1a_hash(ip)}` | ZSET | window+10s | Read rate limit (1000/min sliding window) |
 | `lb:{window}` | ZSET | no TTL | Global leaderboard per window (score=count, member="{type}:{id}"); content_type filter in app |
+| `ls:{user}:{type}:{id}` | STRING | 300s | Per-user like status (RFC3339 ts = liked, "" = not liked) |
+| `ul:{user}:{filter}` | STRING | 60s | User likes first page (JSON, cursor-less only) |
+| `lbf:{window}:{type}:{limit}` | STRING | 60s | Filtered leaderboard (JSON) |
 | `sse:{type}:{id}` | PUB/SUB | -- | SSE event channel |
 
 ### Stampede Protection

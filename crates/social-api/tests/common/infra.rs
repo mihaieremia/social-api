@@ -30,7 +30,7 @@ impl TestContext {
 
         let db = DbPools::from_config(&config).await.expect("db pools");
         let redis_pool = create_pool(&config).await.expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
+        let cache = CacheManager::new(redis_pool, &config);
 
         let mut lock_conn = PgConnection::connect(&config.database_url)
             .await

@@ -222,7 +222,7 @@ pub struct BatchStatusResult {
 }
 
 /// Top liked content item.
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TopLikedItem {
     #[schema(example = "post")]
     pub content_type: String,

@@ -1,7 +1,9 @@
 use bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use metrics::counter;
+use moka::future::Cache;
 use redis::AsyncCommands;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -28,26 +30,65 @@ pub async fn create_pool(config: &Config) -> Result<RedisPool, Box<dyn std::erro
     Ok(pool)
 }
 
-/// Cache manager wrapping Redis pool with graceful fallback.
+/// Two-layer cache manager: moka L1 (in-process, sub-ms) in front of Redis L2.
+///
+/// At high RPS, the L1 cache eliminates redundant Redis round-trips for hot keys.
+/// A 200ms L1 TTL means a key accessed 5000 times/sec hits Redis only ~5 times/sec.
 ///
 /// Every public method returns Option/Result that never propagates Redis errors
 /// to the caller. Errors are logged and treated as cache misses.
 #[derive(Clone)]
 pub struct CacheManager {
     pool: RedisPool,
+    /// L1 in-process cache for string values (GET/SET/MGET).
+    l1_strings: Cache<String, String>,
+    /// L1 in-process cache for sorted set results (ZREVRANGE).
+    l1_zsets: Cache<String, Arc<Vec<(String, f64)>>>,
 }
 
 impl CacheManager {
-    pub fn new(pool: RedisPool) -> Self {
-        Self { pool }
+    pub fn new(pool: RedisPool, config: &Config) -> Self {
+        let l1_ttl = Duration::from_millis(config.local_cache_ttl_ms);
+        let l1_max = config.local_cache_max_capacity;
+
+        let l1_strings = Cache::builder()
+            .max_capacity(l1_max)
+            .time_to_live(l1_ttl)
+            .build();
+
+        let l1_zsets = Cache::builder()
+            .max_capacity(l1_max / 10) // far fewer sorted set keys
+            .time_to_live(l1_ttl)
+            .build();
+
+        tracing::info!(
+            l1_ttl_ms = config.local_cache_ttl_ms,
+            l1_max_capacity = l1_max,
+            "CacheManager initialized with moka L1"
+        );
+
+        Self {
+            pool,
+            l1_strings,
+            l1_zsets,
+        }
     }
 
-    /// Get a string value by key. Returns None on miss or Redis error.
+    /// Get a string value by key. Checks L1 first, then Redis.
+    /// On Redis hit, populates L1 for subsequent requests.
     pub async fn get(&self, key: &str) -> Option<String> {
+        // L1 check
+        if let Some(val) = self.l1_strings.get(key).await {
+            counter!("social_api_cache_operations_total", "operation" => "get", "result" => "l1_hit").increment(1);
+            return Some(val);
+        }
+
+        // L2 (Redis)
         let mut conn = self.pool.get().await.ok()?;
         match conn.get::<_, Option<String>>(key).await {
             Ok(Some(val)) => {
                 counter!("social_api_cache_operations_total", "operation" => "get", "result" => "hit").increment(1);
+                self.l1_strings.insert(key.to_string(), val.clone()).await;
                 Some(val)
             }
             Ok(None) => {
@@ -62,8 +103,13 @@ impl CacheManager {
         }
     }
 
-    /// Set a string value with TTL. Silently fails on Redis error.
+    /// Set a string value with TTL. Writes to both L1 and Redis.
     pub async fn set(&self, key: &str, value: &str, ttl_secs: u64) {
+        // Always update L1 so concurrent readers see fresh data immediately
+        self.l1_strings
+            .insert(key.to_string(), value.to_string())
+            .await;
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -83,12 +129,19 @@ impl CacheManager {
         }
     }
 
-    /// Set multiple string values with TTL in a single Redis pipeline (SETEX per key).
-    /// Silently fails on Redis error. Used by batch_counts to cache misses in one round-trip.
+    /// Set multiple string values with TTL. Writes to both L1 and Redis pipeline.
     pub async fn set_many(&self, entries: &[(&str, &str, u64)]) {
         if entries.is_empty() {
             return;
         }
+
+        // Populate L1 immediately
+        for (key, value, _ttl) in entries {
+            self.l1_strings
+                .insert((*key).to_string(), (*value).to_string())
+                .await;
+        }
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -112,10 +165,11 @@ impl CacheManager {
         }
     }
 
-    /// Delete a key. Silently fails on Redis error.
-    /// Used only by integration tests (cache flush for cold-cache benchmarks).
+    /// Delete a key from both L1 and Redis. Silently fails on Redis error.
     #[allow(dead_code)]
     pub async fn del(&self, key: &str) {
+        self.l1_strings.remove(key).await;
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -160,43 +214,66 @@ impl CacheManager {
         }
     }
 
-    /// Get multiple keys at once (MGET). Returns Vec with None for misses.
+    /// Get multiple keys at once. Checks L1 first, then Redis MGET for misses.
+    /// Populates L1 for any Redis hits.
     pub async fn mget(&self, keys: &[String]) -> Vec<Option<String>> {
         if keys.is_empty() {
             return vec![];
         }
 
+        let mut results: Vec<Option<String>> = Vec::with_capacity(keys.len());
+        let mut redis_needed: Vec<(usize, &String)> = Vec::new();
+
+        // Phase 1: check L1 for each key
+        for (idx, key) in keys.iter().enumerate() {
+            if let Some(val) = self.l1_strings.get(key).await {
+                counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "l1_hit").increment(1);
+                results.push(Some(val));
+            } else {
+                redis_needed.push((idx, key));
+                results.push(None);
+            }
+        }
+
+        if redis_needed.is_empty() {
+            return results;
+        }
+
+        // Phase 2: fetch remaining keys from Redis
+        let redis_keys: Vec<&String> = redis_needed.iter().map(|(_, k)| *k).collect();
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
                 counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis pool GET failed for MGET");
-                return vec![None; keys.len()];
+                return results; // L1 hits are preserved, rest stays None
             }
         };
 
         match redis::cmd("MGET")
-            .arg(keys)
+            .arg(&redis_keys)
             .query_async::<Vec<Option<String>>>(&mut *conn)
             .await
         {
             Ok(vals) => {
-                let hits = vals.iter().filter(|v| v.is_some()).count();
-                let misses = vals.len() - hits;
-                if hits > 0 {
-                    counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "hit").increment(hits as u64);
+                for (i, val) in vals.into_iter().enumerate() {
+                    let (result_idx, key) = redis_needed[i];
+                    if let Some(ref v) = val {
+                        counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "hit").increment(1);
+                        self.l1_strings.insert(key.to_string(), v.clone()).await;
+                    } else {
+                        counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "miss").increment(1);
+                    }
+                    results[result_idx] = val;
                 }
-                if misses > 0 {
-                    counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "miss").increment(misses as u64);
-                }
-                vals
             }
             Err(e) => {
                 counter!("social_api_cache_operations_total", "operation" => "mget", "result" => "error").increment(1);
                 tracing::warn!(error = %e, "Redis MGET failed");
-                vec![None; keys.len()]
             }
         }
+
+        results
     }
 
     /// Publish a message to a Redis channel.
@@ -214,8 +291,14 @@ impl CacheManager {
     }
 
     /// Replace a sorted set atomically: DEL the old key then ZADD all members.
-    /// Used by the leaderboard refresh task.
+    /// Also invalidates all L1 zset cache entries for this key (any range).
     pub async fn replace_sorted_set(&self, key: &str, members: &[(String, f64)]) {
+        // Invalidate all L1 entries whose key starts with "{key}:" (any range variant)
+        let prefix = format!("{key}:");
+        self.l1_zsets
+            .invalidate_entries_if(move |k, _v| k.starts_with(&prefix))
+            .ok();
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -244,13 +327,23 @@ impl CacheManager {
     }
 
     /// Read the top entries from a sorted set in descending score order.
-    /// Returns `(member, score)` pairs, or an empty vec on miss/error.
+    /// Checks L1 first, then Redis. Populates L1 on Redis hit.
+    ///
+    /// L1 key is `"{key}:{start}:{stop}"` to distinguish different range queries.
     pub async fn zrevrange_with_scores(
         &self,
         key: &str,
         start: isize,
         stop: isize,
     ) -> Vec<(String, f64)> {
+        let l1_key = format!("{key}:{start}:{stop}");
+
+        // L1 check
+        if let Some(cached) = self.l1_zsets.get(&l1_key).await {
+            counter!("social_api_cache_operations_total", "operation" => "zrevrange", "result" => "l1_hit").increment(1);
+            return (*cached).clone();
+        }
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -263,12 +356,53 @@ impl CacheManager {
             .zrevrange_withscores::<_, Vec<(String, f64)>>(key, start, stop)
             .await
         {
-            Ok(pairs) => pairs,
+            Ok(pairs) => {
+                if !pairs.is_empty() {
+                    self.l1_zsets.insert(l1_key, Arc::new(pairs.clone())).await;
+                }
+                pairs
+            }
             Err(e) => {
                 tracing::warn!(key = key, error = %e, "Redis ZREVRANGE failed");
                 vec![]
             }
         }
+    }
+
+    /// Delete multiple keys from both L1 and Redis in a pipeline.
+    pub async fn del_many(&self, keys: &[&str]) {
+        if keys.is_empty() {
+            return;
+        }
+
+        for key in keys {
+            self.l1_strings.remove(*key).await;
+        }
+
+        let mut conn = match self.pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Redis pool GET failed for del_many");
+                return;
+            }
+        };
+        let mut pipe = redis::pipe();
+        for key in keys {
+            pipe.del(*key).ignore();
+        }
+        if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
+            tracing::warn!(error = %e, "Redis del_many pipeline failed");
+        }
+    }
+
+    /// Invalidate all L1 string cache entries whose key starts with `prefix`.
+    /// Does NOT touch Redis — callers handle Redis invalidation separately
+    /// (via del_many for explicit keys or TTL expiry for natural eviction).
+    pub fn invalidate_l1_prefix(&self, prefix: &str) {
+        let prefix = prefix.to_string();
+        self.l1_strings
+            .invalidate_entries_if(move |k, _v| k.starts_with(&prefix))
+            .ok();
     }
 
     /// Check if Redis is reachable (for health checks).
@@ -299,7 +433,7 @@ mod tests {
         let mut config = crate::config::Config::new_for_test();
         config.redis_url = scope.redis_url.clone();
         let pool = create_pool(&config).await.unwrap();
-        let cache = CacheManager::new(pool);
+        let cache = CacheManager::new(pool, &config);
         TestHarness {
             _scope: scope,
             cache,
@@ -449,7 +583,8 @@ mod tests {
             .build(manager)
             .await
             .unwrap();
-        let cache = CacheManager::new(pool);
+        let config = crate::config::Config::new_for_test();
+        let cache = CacheManager::new(pool, &config);
 
         // get -> None
         assert_eq!(cache.get("any_key").await, None);
