@@ -8,7 +8,7 @@
         k6-load k6-load-read k6-load-batch k6-load-write k6-load-mixed k6-load-parallel k6-load-sse \
         k6-grpc k6-grpc-read k6-grpc-batch k6-grpc-write k6-grpc-mixed k6-grpc-parallel k6-grpc-health \
         k6-stress k6-spike k6-soak k6-breakpoint k6-tune-macos \
-        up down build-docker logs \
+        up up-app down build-docker logs \
         db-reset migrate sqlx-prepare \
         coverage coverage-full \
         health metrics \
@@ -255,11 +255,14 @@ k6-stress-batch-status: ## Stress: auth batch statuses ramp with max-size payloa
 # Docker
 # ---------------------------------------------------------------------------
 
-up: ## Start all services (postgres, redis, mock-services, social-api, observability)
+up: ## Start all services including monitoring (postgres, redis, mock, app, observability)
+	$(COMPOSE) --profile monitoring up -d
+
+up-app: ## Start app stack only (postgres, redis, mock-services, social-api — no monitoring)
 	$(COMPOSE) up -d
 
-down: ## Stop and remove all containers
-	$(COMPOSE) down
+down: ## Stop and remove all containers (including monitoring profile)
+	$(COMPOSE) --profile monitoring down
 
 build-docker: ## Build Docker images (social-api + mock-services) without cache
 	$(COMPOSE) build --no-cache

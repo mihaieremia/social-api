@@ -17,8 +17,7 @@ social-api/                      # Root
 │   └── shared/                  # Common types, error model, cursor
 ├── migrations/                  # SQLx migrations (embedded)
 ├── docker-compose.yml
-├── Dockerfile                   # Multi-stage (social-api)
-├── Dockerfile.mock              # Multi-stage (mock-services)
+├── Dockerfile                   # Multi-target (social-api + mock-services, distroless runtime)
 └── k6/                          # Load tests
 ```
 
@@ -202,6 +201,6 @@ Encodes `{"t":"2026-02-02T17:00:00Z","id":12345}` as base64url. Query uses `WHER
 
 ## Docker
 
-- **Dockerfile:** Multi-stage (rust:latest builder -> debian:trixie-slim). Non-root user. HEALTHCHECK.
-- **docker-compose.yml:** social-api, postgres:16, redis:7-alpine, mock-services (one binary on port 8081 serves all content APIs and profile API). depends_on with health checks.
-- **`make up`** starts everything (`make help` for all commands).
+- **Dockerfile:** Multi-target (shared rust:1.90 builder -> gcr.io/distroless/cc-debian13:nonroot runtime). Targets: `social-api`, `mock-services`. Non-root (distroless uid 65534).
+- **docker-compose.yml:** social-api, postgres:16, redis:7-alpine, mock-services (one binary on port 8081 serves all content APIs and profile API). depends_on with health checks. Each service uses `target:` to select its Dockerfile stage. Monitoring services use `profiles: [monitoring]`.
+- **`make up`** starts everything including monitoring. **`make up-app`** starts app stack only (`make help` for all commands).

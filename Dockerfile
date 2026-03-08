@@ -1,4 +1,4 @@
-# Stage 1: Build
+# ── Stage 1: Shared builder (compiles all workspace binaries) ─────────────
 FROM rust:1.90 AS builder
 
 WORKDIR /app
@@ -25,35 +25,33 @@ RUN mkdir -p crates/social-api/src crates/shared/src crates/mock-services/src &&
     echo "fn main() {}" > crates/mock-services/src/main.rs
 
 # Build dependencies only (cached layer)
-RUN cargo build --release --bin social-api 2>/dev/null || true
+RUN cargo build --release --bin social-api --bin mock-services 2>/dev/null || true
 
-# Copy actual source code
+# Copy actual source code and migrations (social-api embeds migrations via sqlx)
 COPY crates/ crates/
 COPY migrations/ migrations/
 
-# Touch main files to invalidate cache for source changes
-RUN touch crates/social-api/src/main.rs crates/social-api/src/lib.rs crates/shared/src/lib.rs
+# Touch source files to invalidate cache for source changes
+RUN touch crates/social-api/src/main.rs crates/social-api/src/lib.rs \
+          crates/shared/src/lib.rs crates/mock-services/src/main.rs
 
-# Build the real binary (profile.release in Cargo.toml: lto=fat, codegen-units=1, strip)
-RUN cargo build --release --bin social-api
+# Build both release binaries (profile.release in Cargo.toml: lto=fat, codegen-units=1, strip)
+RUN cargo build --release --bin social-api --bin mock-services
 
-# Stage 2: Runtime
-FROM debian:trixie-slim
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
-
-# Non-root user
-RUN useradd -r -s /bin/false -u 1001 appuser
+# ── Stage 2a: social-api runtime ─────────────────────────────────────────
+FROM gcr.io/distroless/cc-debian13:nonroot AS social-api
 
 COPY --from=builder /app/target/release/social-api /usr/local/bin/social-api
 
-USER appuser
-
 EXPOSE 8080 50051
 
-HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8080/health/live || exit 1
+ENTRYPOINT ["social-api"]
 
-CMD ["social-api"]
+# ── Stage 2b: mock-services runtime ──────────────────────────────────────
+FROM gcr.io/distroless/cc-debian13:nonroot AS mock-services
+
+COPY --from=builder /app/target/release/mock-services /usr/local/bin/mock-services
+
+EXPOSE 8081 50052
+
+ENTRYPOINT ["mock-services"]
