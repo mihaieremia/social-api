@@ -79,6 +79,13 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
+        // Emit initial gauge so Grafana always has a data point for this service.
+        metrics::gauge!(
+            "social_api_circuit_breaker_state",
+            "service" => config.service_name.clone(),
+        )
+        .set(CircuitState::Closed.as_gauge_value());
+
         Self {
             config,
             inner: Mutex::new(Inner {

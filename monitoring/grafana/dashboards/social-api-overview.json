@@ -230,17 +230,8 @@
             "uid": "prometheus"
           },
           "expr": "(sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval])) / sum(rate(social_api_cache_operations_total[$interval]))) * 100",
-          "legendFormat": "HTTP",
+          "legendFormat": "Hit Rate",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.5, sum(rate(social_api_grpc_request_duration_seconds_bucket[$interval])) by (le))",
-          "legendFormat": "gRPC",
-          "refId": "B"
         }
       ],
       "title": "Cache Hit Rate %",
@@ -560,7 +551,7 @@
         }
       ],
       "title": "Circuit Breakers",
-      "type": "state-timeline"
+      "type": "stat"
     },
     {
       "datasource": {
@@ -2899,7 +2890,7 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 9,
+            "w": 6,
             "x": 10,
             "y": 41
           },
@@ -2974,8 +2965,8 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 5,
-            "x": 19,
+            "w": 4,
+            "x": 16,
             "y": 41
           },
           "id": 25,
@@ -3099,19 +3090,18 @@
           },
           "id": 26,
           "options": {
-            "alignValue": "left",
-            "colWidth": 0.9,
-            "legend": {
-              "displayMode": "list",
-              "placement": "bottom"
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
             },
-            "mergeValues": true,
-            "rowHeight": 0.9,
-            "showValue": "auto",
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
+            "textMode": "auto"
           },
           "pluginVersion": "10.0.0",
           "targets": [
@@ -3122,14 +3112,11 @@
               },
               "expr": "social_api_circuit_breaker_state",
               "legendFormat": "{{service}}",
-              "refId": "A",
-              "instant": false,
-              "range": true,
-              "format": "time_series"
+              "refId": "A"
             }
           ],
-          "title": "Circuit Breaker Timeline",
-          "type": "state-timeline"
+          "title": "Circuit Breakers",
+          "type": "stat"
         }
       ]
     },
