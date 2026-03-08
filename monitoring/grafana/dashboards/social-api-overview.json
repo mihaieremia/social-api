@@ -229,7 +229,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval])) / sum(rate(social_api_cache_operations_total[$interval]))) * 100",
+          "expr": "(sum(rate(social_api_cache_operations_total{result=~\"hit|l1_hit\"}[$interval])) / sum(rate(social_api_cache_operations_total{result=~\"hit|l1_hit|miss\"}[$interval]))) * 100",
           "legendFormat": "Hit Rate",
           "refId": "A"
         }
@@ -1789,6 +1789,181 @@
           ],
           "title": "Error Rate by Endpoint",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 30,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "4.."
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "yellow",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "5.."
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 23
+          },
+          "id": 18,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (status) (rate(social_api_http_requests_total{status=~\"[45]..\"}[$interval]))",
+              "legendFormat": "{{status}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Codes (All Endpoints)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 47
+          },
+          "id": 19,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "table",
+              "placement": "right"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (path, status) (rate(social_api_http_requests_total{status=~\"[45]..\"}[$interval]))",
+              "legendFormat": "{{path}} {{status}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Codes by Endpoint",
+          "type": "timeseries"
         }
       ]
     },
@@ -2382,6 +2557,181 @@
           ],
           "title": "Error Rate by Method",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 30,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "(INVALID_ARGUMENT|NOT_FOUND|ALREADY_EXISTS|PERMISSION_DENIED|UNAUTHENTICATED)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "yellow",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "(INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED|RESOURCE_EXHAUSTED)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 24
+          },
+          "id": 808,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (code) (rate(social_api_grpc_requests_total{code!=\"OK\"}[$interval]))",
+              "legendFormat": "{{code}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Codes (All Methods)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 48
+          },
+          "id": 809,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "table",
+              "placement": "right"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (method, code) (rate(social_api_grpc_requests_total{code!=\"OK\"}[$interval]))",
+              "legendFormat": "{{method}} {{code}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Codes by Method",
+          "type": "timeseries"
         }
       ]
     },
@@ -2457,7 +2807,7 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval])) / sum(rate(social_api_cache_operations_total{result=~\"hit|miss\"}[$interval])) * 100",
+              "expr": "sum(rate(social_api_cache_operations_total{result=~\"hit|l1_hit\"}[$interval])) / sum(rate(social_api_cache_operations_total{result=~\"hit|l1_hit|miss\"}[$interval])) * 100",
               "legendFormat": "Hit Ratio",
               "refId": "A"
             }
@@ -2529,12 +2879,30 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum by (operation) (rate(social_api_cache_operations_total[$interval]))",
-              "legendFormat": "{{operation}}",
+              "expr": "sum(rate(social_api_cache_operations_total{result=\"l1_hit\"}[$interval]))",
+              "legendFormat": "L1 Hit",
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval]))",
+              "legendFormat": "Redis Hit",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_cache_operations_total{result=\"miss\"}[$interval]))",
+              "legendFormat": "Miss",
+              "refId": "C"
             }
           ],
-          "title": "Cache Ops/sec by Type",
+          "title": "Cache Ops/sec (L1 vs Redis vs Miss)",
           "type": "timeseries"
         },
         {
@@ -2667,9 +3035,18 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval]))",
-              "legendFormat": "Hit",
+              "expr": "sum(rate(social_api_cache_operations_total{result=\"l1_hit\"}[$interval]))",
+              "legendFormat": "L1 Hit (in-process)",
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(rate(social_api_cache_operations_total{result=\"hit\"}[$interval]))",
+              "legendFormat": "Redis Hit",
+              "refId": "B"
             },
             {
               "datasource": {
@@ -2678,7 +3055,7 @@
               },
               "expr": "sum(rate(social_api_cache_operations_total{result=\"miss\"}[$interval]))",
               "legendFormat": "Miss",
-              "refId": "B"
+              "refId": "C"
             },
             {
               "datasource": {
@@ -2687,10 +3064,10 @@
               },
               "expr": "sum(rate(social_api_cache_operations_total{result=\"error\"}[$interval]))",
               "legendFormat": "Error",
-              "refId": "C"
+              "refId": "D"
             }
           ],
-          "title": "Hit vs Miss vs Error",
+          "title": "L1 vs Redis vs Miss",
           "type": "piechart"
         }
       ]

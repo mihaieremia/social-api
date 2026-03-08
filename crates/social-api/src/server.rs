@@ -102,7 +102,8 @@ impl<B> tower_http::trace::OnResponse<B> for ConditionalOnResponse {
                 tracing::info!(status, latency_ms, "response");
             }
             AccessLogLevel::Errors => {
-                if status >= 400 || latency_ms > 2000.0 {
+                // 429 is an expected operational response (rate limiting), not an error
+                if (status >= 400 && status != 429) || latency_ms > 2000.0 {
                     tracing::warn!(status, latency_ms, "slow or error response");
                 }
             }
