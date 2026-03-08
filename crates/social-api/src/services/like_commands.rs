@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::cache::CacheManager;
 use crate::clients::circuit_breaker::CircuitBreaker;
-use crate::clients::content_client::ContentValidator;
+use crate::clients::content_client::{ContentValidator, ValidationOutcome};
 use crate::config::Config;
 use crate::db::DbPools;
 use crate::repositories;
@@ -197,8 +197,21 @@ impl LikeCommandService {
             .validate(content_type, content_id)
             .await
         {
-            Ok(valid) => {
+            Ok(ValidationOutcome::Remote(valid)) => {
+                // Real HTTP/gRPC call succeeded — signal the circuit breaker.
                 self.content_breaker.record_success();
+                if !valid {
+                    return Err(AppError::ContentNotFound {
+                        content_type: content_type.to_string(),
+                        content_id: content_id.to_string(),
+                    });
+                }
+                Ok(())
+            }
+            Ok(ValidationOutcome::Cached(valid)) => {
+                // Cache hit — no remote call was made, so do NOT signal the breaker.
+                // Signaling on cache hits would prevent the breaker from opening when
+                // the upstream is down but cached results are still being served.
                 if !valid {
                     return Err(AppError::ContentNotFound {
                         content_type: content_type.to_string(),

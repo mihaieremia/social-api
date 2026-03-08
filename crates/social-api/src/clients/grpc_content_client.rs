@@ -46,11 +46,17 @@ impl GrpcContentValidator {
 
 #[async_trait::async_trait]
 impl super::content_client::ContentValidator for GrpcContentValidator {
-    async fn validate(&self, content_type: &str, content_id: Uuid) -> Result<bool, AppError> {
-        // Check cache first (same key format as HTTP client)
+    async fn validate(
+        &self,
+        content_type: &str,
+        content_id: Uuid,
+    ) -> Result<super::content_client::ValidationOutcome, AppError> {
+        use super::content_client::ValidationOutcome;
+
+        // Check cache first — return Cached so caller skips circuit breaker signaling
         let cache_key = Self::cache_key(content_type, content_id);
         if let Some(cached) = self.cache.get(&cache_key).await {
-            return Ok(cached == "1");
+            return Ok(ValidationOutcome::Cached(cached == "1"));
         }
 
         let start = std::time::Instant::now();
@@ -84,7 +90,7 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
                     .set(&cache_key, if valid { "1" } else { "0" }, ttl)
                     .await;
 
-                Ok(valid)
+                Ok(ValidationOutcome::Remote(valid))
             }
             Ok(Err(status)) => {
                 super::metrics::record_external_call(
@@ -101,7 +107,7 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
                 );
                 Err(AppError::DependencyUnavailable("content_api".to_string()))
             }
-            Err(_) => {
+            Err(_timeout) => {
                 super::metrics::record_external_call(
                     "content_api",
                     "validate_grpc",

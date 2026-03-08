@@ -4,11 +4,43 @@ use uuid::Uuid;
 use crate::cache::CacheManager;
 use crate::config::Config;
 
+/// Outcome of a content validation check.
+///
+/// Distinguishes between results served from cache (no real remote call made)
+/// and results from an actual remote call (HTTP or gRPC). Callers use this to
+/// signal the circuit breaker only when a real call was made, preventing cached
+/// hits from masking a failing upstream service.
+#[derive(Debug, Clone, Copy)]
+pub enum ValidationOutcome {
+    /// Result served from cache — circuit breaker must NOT be signaled.
+    Cached(bool),
+    /// Result from a real remote call — circuit breaker MUST be signaled.
+    Remote(bool),
+}
+
+impl ValidationOutcome {
+    /// Extract the boolean validity from either variant.
+    #[allow(dead_code)]
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Cached(v) | Self::Remote(v) => v,
+        }
+    }
+}
+
 /// Trait for content validation — transport-swappable (HTTP or gRPC via INTERNAL_TRANSPORT).
 #[async_trait::async_trait]
 pub trait ContentValidator: Send + Sync {
-    /// Check if content exists. Returns Ok(true) if valid, Ok(false) if not found.
-    async fn validate(&self, content_type: &str, content_id: Uuid) -> Result<bool, AppError>;
+    /// Check if content exists.
+    ///
+    /// Returns `Ok(Cached(..))` when served from cache (no remote call made) or
+    /// `Ok(Remote(..))` when a real HTTP/gRPC call was made. Returns `Err` only
+    /// when the remote call itself failed (network error, 5xx, timeout).
+    async fn validate(
+        &self,
+        content_type: &str,
+        content_id: Uuid,
+    ) -> Result<ValidationOutcome, AppError>;
 }
 
 /// HTTP implementation of ContentValidator.
@@ -35,17 +67,21 @@ impl HttpContentValidator {
 
 #[async_trait::async_trait]
 impl ContentValidator for HttpContentValidator {
-    async fn validate(&self, content_type: &str, content_id: Uuid) -> Result<bool, AppError> {
+    async fn validate(
+        &self,
+        content_type: &str,
+        content_id: Uuid,
+    ) -> Result<ValidationOutcome, AppError> {
         // Check config for known content type
         let base_url = self
             .config
             .content_api_url(content_type)
             .ok_or_else(|| AppError::ContentTypeUnknown(content_type.to_string()))?;
 
-        // Check cache first
+        // Check cache first — return Cached so caller skips circuit breaker signaling
         let cache_key = Self::cache_key(content_type, content_id);
         if let Some(cached) = self.cache.get(&cache_key).await {
-            return Ok(cached == "1");
+            return Ok(ValidationOutcome::Cached(cached == "1"));
         }
 
         // Call Content API with metrics instrumentation
@@ -104,7 +140,7 @@ impl ContentValidator for HttpContentValidator {
                 valid = true,
                 "Content validation result"
             );
-            Ok(true)
+            Ok(ValidationOutcome::Remote(true))
         } else if status.is_server_error() {
             // 5xx — upstream failure, propagate as dependency error (do NOT cache)
             tracing::error!(
@@ -125,7 +161,7 @@ impl ContentValidator for HttpContentValidator {
                 valid = false,
                 "Content validation result"
             );
-            Ok(false)
+            Ok(ValidationOutcome::Remote(false))
         }
     }
 }

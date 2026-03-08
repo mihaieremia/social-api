@@ -19,7 +19,7 @@ use tower::ServiceExt as _;
 use uuid::Uuid;
 
 use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use social_api::clients::content_client::ContentValidator;
+use social_api::clients::content_client::{ContentValidator, ValidationOutcome};
 use social_api::clients::profile_client::TokenValidator;
 use social_api::server::{build_grpc_server, build_router};
 use social_api::services::like_service::LikeService;
@@ -160,8 +160,12 @@ pub struct TestContentValidator;
 
 #[async_trait::async_trait]
 impl ContentValidator for TestContentValidator {
-    async fn validate(&self, _content_type: &str, _content_id: Uuid) -> Result<bool, AppError> {
-        Ok(true)
+    async fn validate(
+        &self,
+        _content_type: &str,
+        _content_id: Uuid,
+    ) -> Result<ValidationOutcome, AppError> {
+        Ok(ValidationOutcome::Remote(true))
     }
 }
 

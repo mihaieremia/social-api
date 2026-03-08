@@ -106,8 +106,23 @@ pub async fn insert_like(
                     count,
                 }),
                 None => {
-                    // Row was concurrently deleted — no fake timestamp.
-                    Ok(InsertLikeResult::ConcurrentlyRemoved { count: 0 })
+                    // Row was concurrently deleted between the INSERT conflict and the
+                    // follow-up SELECT. The transaction is already committed above so we
+                    // use `pool` directly to read the authoritative count rather than
+                    // returning a hard-coded 0 that would corrupt the response.
+                    let count: i64 = sqlx::query_scalar(
+                        r#"
+                        SELECT COALESCE(total_count, 0) FROM like_counts
+                        WHERE content_type = $1 AND content_id = $2
+                        "#,
+                    )
+                    .bind(content_type)
+                    .bind(content_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .unwrap_or(0);
+
+                    Ok(InsertLikeResult::ConcurrentlyRemoved { count })
                 }
             }
         }

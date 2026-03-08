@@ -151,6 +151,7 @@ impl LikeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::content_client::ValidationOutcome;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -165,8 +166,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ContentValidator for AlwaysValidContent {
-        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
-            Ok(true)
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<ValidationOutcome, AppError> {
+            Ok(ValidationOutcome::Remote(true))
         }
     }
 
@@ -174,8 +175,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ContentValidator for AlwaysInvalidContent {
-        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
-            Ok(false)
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<ValidationOutcome, AppError> {
+            Ok(ValidationOutcome::Remote(false))
         }
     }
 
@@ -614,7 +615,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ContentValidator for AlwaysErrorContent {
-        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<bool, AppError> {
+        async fn validate(&self, _ct: &str, _id: Uuid) -> Result<ValidationOutcome, AppError> {
             Err(AppError::DependencyUnavailable("content_api".to_string()))
         }
     }

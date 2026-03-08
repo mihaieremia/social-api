@@ -370,6 +370,10 @@ impl CacheManager {
     }
 
     /// Delete multiple keys from both L1 and Redis in a pipeline.
+    ///
+    /// Removes matching entries from both the string and sorted-set L1 caches.
+    /// The sorted-set L1 uses `"{key}:{start}:{stop}"` compound keys, so prefix
+    /// invalidation is used to catch all range variants of a given base key.
     pub async fn del_many(&self, keys: &[&str]) {
         if keys.is_empty() {
             return;
@@ -377,6 +381,12 @@ impl CacheManager {
 
         for key in keys {
             self.l1_strings.remove(*key).await;
+            // Sorted-set L1 keys are stored as "{key}:{start}:{stop}". Invalidate
+            // all range variants so stale ZSET data is never served after deletion.
+            let prefix = format!("{key}:");
+            self.l1_zsets
+                .invalidate_entries_if(move |k, _v| k.starts_with(&prefix))
+                .ok();
         }
 
         let mut conn = match self.pool.get().await {

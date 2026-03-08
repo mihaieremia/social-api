@@ -15,7 +15,8 @@ use crate::repositories;
 use crate::services::like_count_cache::{LikeCountCache, map_db_error};
 
 /// Cached first page of a user's likes.
-/// Stores up to 101 LikeRows (limit=100 + 1 for has_more detection at max).
+/// Stores up to 100 LikeRows; `has_more` is determined by the repository's
+/// internal limit+1 fetch, not by the size of this slice.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedUserLikePage {
     rows: Vec<repositories::LikeRow>,
@@ -345,17 +346,33 @@ impl LikeQueryService {
                 });
             }
 
-            // Cache miss: refresh task populates this every 60s.
-            // Return empty rather than hitting DB on-demand.
+            // Cache miss: fall back to DB directly.
+            // The refresh task populates this cache every ~60s; on cold start or
+            // after a cache flush this ensures clients always see real data rather
+            // than an empty result set.
             tracing::debug!(
                 window = window.as_str(),
                 content_type = ct,
-                "Filtered leaderboard cache miss — awaiting next refresh cycle"
+                "Filtered leaderboard cache miss — querying DB directly"
             );
+            let since = window
+                .duration_secs()
+                .map(|secs| Utc::now() - Duration::seconds(secs));
+            let rows = repositories::get_leaderboard(&self.db.reader, Some(ct), since, limit)
+                .await
+                .map_err(map_db_error)?;
+            let items = rows
+                .into_iter()
+                .map(|(content_type, content_id, count)| TopLikedItem {
+                    content_type,
+                    content_id,
+                    count,
+                })
+                .collect();
             return Ok(TopLikedResponse {
                 window: window.as_str().to_string(),
                 content_type: Some(ct.to_string()),
-                items: vec![],
+                items,
             });
         }
 

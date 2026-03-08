@@ -19,7 +19,7 @@
 
 use social_api::cache::CacheManager;
 use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use social_api::clients::content_client::ContentValidator;
+use social_api::clients::content_client::{ContentValidator, ValidationOutcome};
 use social_api::config::Config;
 use social_api::db::DbPools;
 use social_api::middleware::rate_limit::check_rate_limit_inner;
@@ -65,8 +65,12 @@ struct AlwaysValidContent;
 
 #[async_trait::async_trait]
 impl ContentValidator for AlwaysValidContent {
-    async fn validate(&self, _content_type: &str, _content_id: Uuid) -> Result<bool, AppError> {
-        Ok(true)
+    async fn validate(
+        &self,
+        _content_type: &str,
+        _content_id: Uuid,
+    ) -> Result<ValidationOutcome, AppError> {
+        Ok(ValidationOutcome::Remote(true))
     }
 }
 
