@@ -9,10 +9,3 @@ CREATE TABLE IF NOT EXISTS like_counts (
     PRIMARY KEY (content_type, content_id),
     CONSTRAINT chk_total_count_non_negative CHECK (total_count >= 0)
 );
-
--- Composite index for time-windowed leaderboard queries with content_type filter.
--- Covers: WHERE content_type = $1 AND created_at >= $2
--- Without this: seq scan or idx_likes_content (no time filter).
--- With this: index range scan on (content_type, created_at) — O(window rows).
-CREATE INDEX IF NOT EXISTS idx_likes_content_type_created_at
-    ON likes (content_type, created_at DESC);

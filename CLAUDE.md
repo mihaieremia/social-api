@@ -116,10 +116,9 @@ CREATE TABLE likes (
 );
 -- User's liked items (cursor pagination)
 CREATE INDEX idx_likes_user_created ON likes (user_id, created_at DESC, id DESC);
--- Count aggregation fallback
-CREATE INDEX idx_likes_content ON likes (content_type, content_id);
--- Time-windowed leaderboard (B-tree composite for range scan + GROUP BY)
-CREATE INDEX idx_likes_created_ct_cid ON likes (created_at, content_type, content_id);
+-- Time-windowed leaderboard with content_type filter support
+-- Filtered queries seek to content_type partition, then range-scan created_at.
+CREATE INDEX idx_likes_ct_created_cid ON likes (content_type, created_at DESC, content_id);
 ```
 
 ### like_counts table (materialized counter)

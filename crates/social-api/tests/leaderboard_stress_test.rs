@@ -197,7 +197,7 @@ async fn test_leaderboard_refresh_under_load() {
     let mut all_durations = Vec::with_capacity(num_runs);
     for run in 0..num_runs {
         let start = Instant::now();
-        leaderboard_refresh::refresh_all_windows_public(&db, &cache)
+        leaderboard_refresh::refresh_all_windows_public(&db, &cache, &context.config)
             .await
             .expect("refresh_all_windows must not fail");
         let elapsed = start.elapsed();
@@ -231,7 +231,7 @@ async fn test_leaderboard_refresh_under_load() {
 
     for window in &windows {
         let start = Instant::now();
-        leaderboard_refresh::refresh_window_public(&db, &cache, *window)
+        leaderboard_refresh::refresh_window_public(&db, &cache, &context.config, *window)
             .await
             .expect("refresh_window must not fail");
         let elapsed = start.elapsed();

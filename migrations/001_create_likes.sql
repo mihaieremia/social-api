@@ -13,12 +13,8 @@ CREATE TABLE IF NOT EXISTS likes (
 CREATE INDEX IF NOT EXISTS idx_likes_user_created
     ON likes (user_id, created_at DESC, id DESC);
 
--- Count aggregation fallback when cache misses
--- Covers: SELECT COUNT(*) FROM likes WHERE content_type = $1 AND content_id = $2
-CREATE INDEX IF NOT EXISTS idx_likes_content
-    ON likes (content_type, content_id);
-
--- Time-windowed leaderboard aggregation (B-tree composite for range scan + GROUP BY)
--- Covers: WHERE created_at >= $cutoff GROUP BY content_type, content_id
-CREATE INDEX IF NOT EXISTS idx_likes_created_ct_cid
-    ON likes (created_at, content_type, content_id);
+-- Time-windowed leaderboard aggregation with content_type filter support.
+-- Filtered queries seek to content_type partition, then range-scan created_at.
+-- Unfiltered queries still work via merge of per-type ranges.
+CREATE INDEX IF NOT EXISTS idx_likes_ct_created_cid
+    ON likes (content_type, created_at DESC, content_id);

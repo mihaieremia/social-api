@@ -345,39 +345,17 @@ impl LikeQueryService {
                 });
             }
 
-            // Cache miss: query DB
-            let since = window
-                .duration_secs()
-                .map(|secs| Utc::now() - Duration::seconds(secs));
-
-            let rows = repositories::get_leaderboard(&self.db.reader, Some(ct), since, limit)
-                .await
-                .map_err(map_db_error)?;
-
-            let items: Vec<TopLikedItem> = rows
-                .into_iter()
-                .map(|(content_type, content_id, count)| TopLikedItem {
-                    content_type,
-                    content_id,
-                    count,
-                })
-                .collect();
-
-            // Cache the result
-            if let Ok(json) = serde_json::to_string(&items) {
-                self.cache
-                    .set(
-                        &cache_key,
-                        &json,
-                        self.config.cache_ttl_leaderboard_filtered_secs,
-                    )
-                    .await;
-            }
-
+            // Cache miss: refresh task populates this every 60s.
+            // Return empty rather than hitting DB on-demand.
+            tracing::debug!(
+                window = window.as_str(),
+                content_type = ct,
+                "Filtered leaderboard cache miss — awaiting next refresh cycle"
+            );
             return Ok(TopLikedResponse {
                 window: window.as_str().to_string(),
                 content_type: Some(ct.to_string()),
-                items,
+                items: vec![],
             });
         }
 

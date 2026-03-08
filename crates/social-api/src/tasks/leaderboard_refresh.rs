@@ -1,5 +1,4 @@
 use chrono::{Duration, Utc};
-use futures::future::join_all;
 use shared::types::TimeWindow;
 use tokio_util::sync::CancellationToken;
 
@@ -38,7 +37,7 @@ pub fn spawn_leaderboard_refresh(
         );
 
         // Warm cache immediately on startup (avoids cold-start DB hammering)
-        if let Err(e) = refresh_all_windows(&db, &cache).await {
+        if let Err(e) = refresh_all_windows(&db, &cache, &config).await {
             tracing::error!(error = %e, "Initial leaderboard refresh failed");
         }
 
@@ -61,7 +60,7 @@ pub fn spawn_leaderboard_refresh(
                     let sleep_secs = (interval_secs as f64 * (1.0 + jitter_factor)).max(1.0) as u64;
                     std::time::Duration::from_secs(sleep_secs)
                 }) => {
-                    if let Err(e) = refresh_all_windows(&db, &cache).await {
+                    if let Err(e) = refresh_all_windows(&db, &cache, &config).await {
                         tracing::error!(error = %e, "Leaderboard refresh cycle failed");
                     }
                 }
@@ -70,19 +69,15 @@ pub fn spawn_leaderboard_refresh(
     })
 }
 
-/// Run one full refresh cycle across every time window — all windows in parallel.
+/// Run one full refresh cycle across every time window — sequentially to avoid
+/// saturating the reader pool and causing latency spikes on other read endpoints.
 async fn refresh_all_windows(
     db: &DbPools,
     cache: &CacheManager,
+    config: &Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let futures: Vec<_> = WINDOWS
-        .iter()
-        .map(|&window| refresh_window(db, cache, window))
-        .collect();
-
-    let results = join_all(futures).await;
-    for result in results {
-        if let Err(e) = result {
+    for &window in &WINDOWS {
+        if let Err(e) = refresh_window(db, cache, config, window).await {
             tracing::warn!(error = %e, "Failed to refresh leaderboard window");
         }
     }
@@ -99,6 +94,7 @@ async fn refresh_all_windows(
 async fn refresh_window(
     db: &DbPools,
     cache: &CacheManager,
+    config: &Config,
     window: TimeWindow,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let since = window
@@ -126,6 +122,49 @@ async fn refresh_window(
         "Leaderboard window refreshed"
     );
 
+    // Precompute filtered leaderboards per content type.
+    for content_type in config.content_api_urls.keys() {
+        match repositories::get_leaderboard(
+            &db.reader,
+            Some(content_type.as_str()),
+            since,
+            LEADERBOARD_LIMIT,
+        )
+        .await
+        {
+            Ok(rows) => {
+                let items: Vec<shared::types::TopLikedItem> = rows
+                    .into_iter()
+                    .map(|(ct, cid, count)| shared::types::TopLikedItem {
+                        content_type: ct,
+                        content_id: cid,
+                        count,
+                    })
+                    .collect();
+
+                if let Ok(json) = serde_json::to_string(&items) {
+                    let key = format!(
+                        "lbf:{}:{}:{}",
+                        window.as_str(),
+                        content_type,
+                        LEADERBOARD_LIMIT
+                    );
+                    cache
+                        .set(&key, &json, config.cache_ttl_leaderboard_filtered_secs)
+                        .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    window = window.as_str(),
+                    content_type = content_type.as_str(),
+                    "Failed to refresh filtered leaderboard"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -135,8 +174,9 @@ async fn refresh_window(
 pub async fn refresh_all_windows_public(
     db: &DbPools,
     cache: &CacheManager,
+    config: &Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    refresh_all_windows(db, cache).await
+    refresh_all_windows(db, cache, config).await
 }
 
 /// Public wrapper for single-window refresh (integration/stress tests).
@@ -144,9 +184,10 @@ pub async fn refresh_all_windows_public(
 pub async fn refresh_window_public(
     db: &DbPools,
     cache: &CacheManager,
+    config: &Config,
     window: TimeWindow,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    refresh_window(db, cache, window).await
+    refresh_window(db, cache, config, window).await
 }
 
 #[cfg(test)]
@@ -156,6 +197,7 @@ mod tests {
         _scope: crate::test_containers::TestScope,
         db: DbPools,
         cache: CacheManager,
+        config: crate::config::Config,
     }
 
     /// Return DbPools + CacheManager connected to the shared containers.
@@ -176,6 +218,7 @@ mod tests {
             _scope: scope,
             db,
             cache,
+            config,
         }
     }
 
@@ -186,11 +229,9 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_all_windows_empty_db() {
         let harness = setup().await;
-        let db = harness.db;
-        let cache = harness.cache;
 
         // Should not panic or return an error
-        let result = refresh_all_windows(&db, &cache).await;
+        let result = refresh_all_windows(&harness.db, &harness.cache, &harness.config).await;
         assert!(
             result.is_ok(),
             "refresh_all_windows must not fail on empty DB"
@@ -199,7 +240,7 @@ mod tests {
         // All four window ZSETs must exist (even if empty after replace_sorted_set)
         for window in WINDOWS {
             let key = format!("lb:{}", window.as_str());
-            let entries = cache.zrevrange_with_scores(&key, 0, -1).await;
+            let entries = harness.cache.zrevrange_with_scores(&key, 0, -1).await;
             // Empty ZSET after DEL is fine — just assert it doesn't error
             assert!(entries.len() <= LEADERBOARD_LIMIT as usize);
         }
@@ -212,8 +253,6 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_window_populates_zset_with_data() {
         let harness = setup().await;
-        let db = harness.db;
-        let cache = harness.cache;
 
         // Insert likes directly so the leaderboard query returns results
         let user_id = uuid::Uuid::new_v4();
@@ -223,7 +262,7 @@ mod tests {
             .bind(user_id)
             .bind("post")
             .bind(content_id)
-            .execute(&db.writer)
+            .execute(&harness.db.writer)
             .await
             .unwrap();
 
@@ -235,16 +274,22 @@ mod tests {
         )
         .bind("post")
         .bind(content_id)
-        .execute(&db.writer)
+        .execute(&harness.db.writer)
         .await
         .unwrap();
 
         // Refresh the "all" window (TimeWindow::All has no time filter -> uses like_counts)
-        let result = refresh_window(&db, &cache, TimeWindow::All).await;
+        let result = refresh_window(
+            &harness.db,
+            &harness.cache,
+            &harness.config,
+            TimeWindow::All,
+        )
+        .await;
         assert!(result.is_ok());
 
         let key = format!("lb:{}", TimeWindow::All.as_str());
-        let entries = cache.zrevrange_with_scores(&key, 0, -1).await;
+        let entries = harness.cache.zrevrange_with_scores(&key, 0, -1).await;
         assert!(
             !entries.is_empty(),
             "lb:all must contain entries after refresh with data"
@@ -264,8 +309,6 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_window_day_uses_likes_table() {
         let harness = setup().await;
-        let db = harness.db;
-        let cache = harness.cache;
 
         // Insert two likes for content_a and one like for content_b
         let content_a = uuid::Uuid::new_v4();
@@ -278,7 +321,7 @@ mod tests {
             .bind(uuid::Uuid::new_v4())
             .bind("post")
             .bind(content_a)
-            .execute(&db.writer)
+            .execute(&harness.db.writer)
             .await
             .unwrap();
         }
@@ -286,15 +329,21 @@ mod tests {
             .bind(uuid::Uuid::new_v4())
             .bind("post")
             .bind(content_b)
-            .execute(&db.writer)
+            .execute(&harness.db.writer)
             .await
             .unwrap();
 
-        let result = refresh_window(&db, &cache, TimeWindow::Day).await;
+        let result = refresh_window(
+            &harness.db,
+            &harness.cache,
+            &harness.config,
+            TimeWindow::Day,
+        )
+        .await;
         assert!(result.is_ok());
 
         let key = format!("lb:{}", TimeWindow::Day.as_str());
-        let entries = cache.zrevrange_with_scores(&key, 0, -1).await;
+        let entries = harness.cache.zrevrange_with_scores(&key, 0, -1).await;
 
         // content_a should outrank content_b (score 2 vs 1)
         let member_a = format!("post:{content_a}");
@@ -324,16 +373,16 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_all_windows_covers_all_four_windows() {
         let harness = setup().await;
-        let db = harness.db;
-        let cache = harness.cache;
 
-        refresh_all_windows(&db, &cache).await.unwrap();
+        refresh_all_windows(&harness.db, &harness.cache, &harness.config)
+            .await
+            .unwrap();
 
         // All four ZSETs must have been touched (even if empty)
         for window in WINDOWS {
             let key = format!("lb:{}", window.as_str());
             // zrevrange_with_scores returns vec (possibly empty) -- it must not panic
-            let _ = cache.zrevrange_with_scores(&key, 0, 9).await;
+            let _ = harness.cache.zrevrange_with_scores(&key, 0, 9).await;
         }
     }
 

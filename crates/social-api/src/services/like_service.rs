@@ -461,20 +461,31 @@ mod tests {
     async fn test_get_leaderboard_with_content_type_filter() {
         let harness = make_service(Arc::new(AlwaysValidContent)).await;
         let svc = harness.svc;
-        let user_id = Uuid::new_v4();
+        let cache = &harness.cache;
         let post_id = Uuid::new_v4();
 
-        svc.like(user_id, "lb_svc_test", post_id).await.unwrap();
+        // Simulate what the refresh task does: pre-populate the filtered
+        // leaderboard cache key so the query service finds a cache hit.
+        let items = vec![shared::types::TopLikedItem {
+            content_type: "post".to_string(),
+            content_id: post_id,
+            count: 1,
+        }];
+        let json = serde_json::to_string(&items).unwrap();
+        // The query clamps limit to 1..=50, so limit=10 stays 10.
+        // Cache key format: lbf:{window}:{type}:{limit}
+        cache.set("lbf:all:post:10", &json, 60).await;
 
         let resp = svc
-            .get_leaderboard(Some("lb_svc_test"), TimeWindow::All, 10)
+            .get_leaderboard(Some("post"), TimeWindow::All, 10)
             .await
             .unwrap();
 
         assert_eq!(resp.window, "all");
-        assert_eq!(resp.content_type, Some("lb_svc_test".to_string()));
+        assert_eq!(resp.content_type, Some("post".to_string()));
         assert!(!resp.items.is_empty(), "expected at least one item");
         assert_eq!(resp.items[0].count, 1);
+        assert_eq!(resp.items[0].content_id, post_id);
     }
 
     #[tokio::test]
