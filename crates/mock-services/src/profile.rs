@@ -18,18 +18,17 @@ pub async fn validate_token(req: Request) -> impl IntoResponse {
 
     let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
 
-    for entry in data::tokens() {
-        if entry.token == token {
-            return (
-                StatusCode::OK,
-                Json(json!({
-                    "valid": true,
-                    "user_id": format!("usr_{}", entry.user_id),
-                    "display_name": entry.display_name,
-                })),
-            )
-                .into_response();
-        }
+    // Dynamic token validation: supports tok_user_1..100000
+    if let Some((user_id, display_name)) = data::validate_token(token) {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "valid": true,
+                "user_id": format!("usr_{user_id}"),
+                "display_name": display_name,
+            })),
+        )
+            .into_response();
     }
 
     (

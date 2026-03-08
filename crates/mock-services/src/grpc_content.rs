@@ -15,11 +15,11 @@ impl ContentService for MockContentService {
     ) -> Result<Response<internal_v1::ValidateContentResponse>, Status> {
         let body = req.into_inner();
 
-        let content_id = Uuid::parse_str(&body.content_id)
+        let _content_id = Uuid::parse_str(&body.content_id)
             .map_err(|_| Status::invalid_argument("Invalid content ID"))?;
 
-        let valid_ids = data::content_ids(&body.content_type);
-        let exists = valid_ids.contains(&content_id);
+        // Accept any valid UUID for known content types (enables stress testing at scale)
+        let exists = data::is_known_content_type(&body.content_type);
 
         Ok(Response::new(internal_v1::ValidateContentResponse {
             exists,

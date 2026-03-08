@@ -1,6 +1,18 @@
 use uuid::Uuid;
 
-/// Pre-seeded valid content IDs per content type (20 each for load testing).
+/// Known content types. Any valid UUID is accepted for these types.
+/// Adding a new content type requires only a CONTENT_API_{TYPE}_URL env var
+/// in the main service — and adding it here for mock validation.
+const KNOWN_CONTENT_TYPES: &[&str] = &["post", "bonus_hunter", "top_picks"];
+
+/// Check if a content type is registered.
+pub fn is_known_content_type(content_type: &str) -> bool {
+    KNOWN_CONTENT_TYPES.contains(&content_type)
+}
+
+/// Pre-seeded valid content IDs per content type (backward-compatible).
+/// For stress testing, use `is_known_content_type()` instead — it accepts any UUID.
+#[allow(dead_code)]
 pub fn content_ids(content_type: &str) -> Vec<Uuid> {
     match content_type {
         "post" => vec![
@@ -79,14 +91,37 @@ pub fn content_ids(content_type: &str) -> Vec<Uuid> {
     }
 }
 
-/// Token -> (user_id, display_name) mapping. 20 users for load testing.
+/// Validate a token dynamically. Supports:
+/// - Static tok_user_1..20 with original UUIDs (backward-compatible)
+/// - Dynamic tok_user_21..100000 with generated UUIDs (stress testing)
+///
+/// Returns (user_id, display_name) on success.
+pub fn validate_token(token: &str) -> Option<(String, String)> {
+    // Check static entries first (backward compat for tok_user_1..20)
+    for entry in static_tokens() {
+        if entry.token == token {
+            return Some((entry.user_id.to_string(), entry.display_name.to_string()));
+        }
+    }
+
+    // Dynamic: tok_user_N for any N in 1..=100000
+    let n: u64 = token.strip_prefix("tok_user_")?.parse().ok()?;
+    if !(1..=100_000).contains(&n) {
+        return None;
+    }
+    let user_id = format!("00000000-0000-4000-8000-{n:012x}");
+    let display_name = format!("Test User {n}");
+    Some((user_id, display_name))
+}
+
+/// Static token entries — backward-compatible with original 20 test users.
 pub struct TokenEntry {
     pub token: &'static str,
     pub user_id: &'static str,
     pub display_name: &'static str,
 }
 
-pub fn tokens() -> Vec<TokenEntry> {
+fn static_tokens() -> Vec<TokenEntry> {
     vec![
         TokenEntry {
             token: "tok_user_1",
@@ -189,4 +224,11 @@ pub fn tokens() -> Vec<TokenEntry> {
             display_name: "Test User 20",
         },
     ]
+}
+
+/// Backward-compatible: returns static token entries only.
+/// Callers that need dynamic token support should use `validate_token()` instead.
+#[allow(dead_code)]
+pub fn tokens() -> Vec<TokenEntry> {
+    static_tokens()
 }

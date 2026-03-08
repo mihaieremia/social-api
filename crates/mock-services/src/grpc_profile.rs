@@ -14,14 +14,13 @@ impl ProfileService for MockProfileService {
     ) -> Result<Response<internal_v1::ValidateTokenResponse>, Status> {
         let body = req.into_inner();
 
-        for entry in data::tokens() {
-            if entry.token == body.token {
-                return Ok(Response::new(internal_v1::ValidateTokenResponse {
-                    valid: true,
-                    user_id: entry.user_id.to_string(),
-                    display_name: entry.display_name.to_string(),
-                }));
-            }
+        // Dynamic token validation: supports tok_user_1..100000
+        if let Some((user_id, display_name)) = data::validate_token(&body.token) {
+            return Ok(Response::new(internal_v1::ValidateTokenResponse {
+                valid: true,
+                user_id,
+                display_name,
+            }));
         }
 
         Err(Status::unauthenticated("Invalid token"))

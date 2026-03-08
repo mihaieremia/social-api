@@ -24,9 +24,8 @@ pub async fn get_content(
         }
     };
 
-    let valid_ids = data::content_ids(&content_type);
-
-    if valid_ids.is_empty() {
+    // Accept any valid UUID for known content types (enables stress testing at scale)
+    if !data::is_known_content_type(&content_type) {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "unknown_content_type" })),
@@ -34,23 +33,15 @@ pub async fn get_content(
             .into_response();
     }
 
-    if valid_ids.contains(&id) {
-        (
-            StatusCode::OK,
-            Json(json!({
-                "id": id,
-                "title": format!("Mock {} item {}", content_type, id),
-                "content_type": content_type,
-            })),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "content_not_found" })),
-        )
-            .into_response()
-    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": id,
+            "title": format!("Mock {} item {}", content_type, id),
+            "content_type": content_type,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /health

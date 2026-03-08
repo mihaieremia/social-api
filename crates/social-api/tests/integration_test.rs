@@ -454,9 +454,11 @@ async fn test_mock_content_api() {
 #[tokio::test]
 #[ignore]
 async fn test_mock_content_not_found() {
+    // Mock-services accepts any UUID for known content types (post, bonus_hunter, top_picks),
+    // so use an unknown content type to verify the 404 path.
     let fake_id = uuid::Uuid::new_v4();
     let resp = client()
-        .get(format!("{MOCK_URL}/v1/post/{fake_id}"))
+        .get(format!("{MOCK_URL}/v1/unknown_type/{fake_id}"))
         .send()
         .await
         .unwrap();
