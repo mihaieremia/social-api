@@ -288,13 +288,22 @@ impl CacheManager {
 mod tests {
     use super::*;
 
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        cache: CacheManager,
+    }
+
     /// Return a CacheManager connected to the shared Redis container.
-    async fn make_cache() -> CacheManager {
-        let redis = crate::test_containers::shared_redis().await;
+    async fn make_cache() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
         let mut config = crate::config::Config::new_for_test();
-        config.redis_url = redis.url.clone();
+        config.redis_url = scope.redis_url.clone();
         let pool = create_pool(&config).await.unwrap();
-        CacheManager::new(pool)
+        let cache = CacheManager::new(pool);
+        TestHarness {
+            _scope: scope,
+            cache,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -303,7 +312,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_set() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         let key = "test:get_set";
 
         // Nothing there yet
@@ -320,7 +330,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         assert_eq!(cache.get("test:definitely_absent_key").await, None);
     }
 
@@ -330,7 +341,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mget() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
 
         cache.set("test:mget_k1", "100", 60).await;
         cache.set("test:mget_k2", "200", 60).await;
@@ -350,7 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mget_empty_input_returns_empty() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         let results = cache.mget(&[]).await;
         assert!(results.is_empty());
     }
@@ -361,7 +374,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_zrevrange_with_scores() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         let key = "test:zrev_scores";
 
         let members = vec![
@@ -389,7 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_replace_sorted_set_overwrites() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         let key = "test:zrev_overwrite";
 
         // First population
@@ -414,7 +429,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_healthy_returns_true() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
         assert!(cache.is_healthy().await);
     }
 

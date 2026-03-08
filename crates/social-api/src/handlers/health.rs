@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use shared::types::{HealthDetail, HealthResponse};
 
+use crate::health;
 use crate::state::AppState;
 
 /// Build a HealthDetail for a single dependency check.
@@ -57,28 +58,20 @@ pub async fn liveness() -> impl IntoResponse {
 )]
 pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
     let mut details = HashMap::new();
-
-    // Run all dependency checks in parallel so worst-case latency is
-    // max(individual timeout) rather than sum of all timeouts.
-    let (db_healthy, redis_healthy, content_healthy) = tokio::join!(
-        state.db().is_healthy(),
-        state.cache().is_healthy(),
-        check_any_content_api(&state),
-    );
-
-    let all_healthy = db_healthy && redis_healthy && content_healthy;
+    let health = health::check_dependencies(&state).await;
+    let all_healthy = health.all_healthy();
 
     details.insert(
         "database".to_string(),
-        make_health_detail(db_healthy, "Database unreachable"),
+        make_health_detail(health.database, "Database unreachable"),
     );
     details.insert(
         "redis".to_string(),
-        make_health_detail(redis_healthy, "Redis unreachable"),
+        make_health_detail(health.redis, "Redis unreachable"),
     );
     details.insert(
         "content_api".to_string(),
-        make_health_detail(content_healthy, "No content API reachable"),
+        make_health_detail(health.content_api, "No content API reachable"),
     );
 
     let status_code = if all_healthy {
@@ -98,22 +91,4 @@ pub async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
             details: Some(details),
         }),
     )
-}
-
-/// Check if at least one content API is reachable via its health endpoint.
-async fn check_any_content_api(state: &AppState) -> bool {
-    for url in state.config().content_api_urls.values() {
-        let health_url = format!("{url}/health");
-        match state
-            .http_client()
-            .get(&health_url)
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => return true,
-            _ => continue,
-        }
-    }
-    false
 }

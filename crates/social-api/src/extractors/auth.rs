@@ -3,9 +3,10 @@ use axum::{
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Json},
 };
-use shared::errors::{ApiError, AppError, ErrorCode};
+use shared::errors::{ApiError, ErrorCode};
 use shared::types::AuthenticatedUser;
 
+use crate::auth::{self as authentication, AuthFailure};
 use crate::state::AppState;
 
 /// Extractor that validates Bearer token and provides AuthenticatedUser.
@@ -27,41 +28,18 @@ where
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or(AuthError::MissingToken)?;
+            .ok_or(AuthFailure::MissingToken)?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or(AuthError::MalformedToken)?;
+        let token = authentication::parse_bearer_token(auth_header)?;
+        let user = authentication::authenticate_token(
+            token,
+            app_state.token_validator(),
+            app_state.profile_breaker(),
+        )
+        .await?;
 
-        if token.is_empty() {
-            return Err(AuthError::MalformedToken);
-        }
-
-        // Check circuit breaker before calling Profile API
-        if !app_state.profile_breaker().allow_request() {
-            return Err(AuthError::ServiceUnavailable);
-        }
-
-        // Delegate to TokenValidator trait implementation
-        match app_state.token_validator().validate(token).await {
-            Ok(user) => {
-                app_state.profile_breaker().record_success();
-                // Record authenticated user_id into the active TraceLayer span.
-                tracing::Span::current().record("user_id", user.user_id.to_string());
-                Ok(AuthUser(user))
-            }
-            Err(e) => {
-                // Record failure for dependency errors, not auth errors
-                match &e {
-                    AppError::DependencyUnavailable(_) | AppError::Internal(_) => {
-                        app_state.profile_breaker().record_failure();
-                        Err(AuthError::ServiceUnavailable)
-                    }
-                    AppError::Unauthorized(_) => Err(AuthError::InvalidToken),
-                    _ => Err(AuthError::ServiceUnavailable),
-                }
-            }
-        }
+        tracing::Span::current().record("user_id", user.user_id.to_string());
+        Ok(AuthUser(user))
     }
 }
 
@@ -78,23 +56,24 @@ impl FromRef<AppState> for AppState {
 
 /// Auth rejection error type.
 #[derive(Debug)]
-pub enum AuthError {
-    MissingToken,
-    MalformedToken,
-    InvalidToken,
-    ServiceUnavailable,
+pub struct AuthError(pub AuthFailure);
+
+impl From<AuthFailure> for AuthError {
+    fn from(value: AuthFailure) -> Self {
+        Self(value)
+    }
 }
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
-        let (code, message) = match self {
-            Self::MissingToken => (ErrorCode::Unauthorized, "Missing authorization header"),
-            Self::MalformedToken => (
+        let (code, message) = match self.0 {
+            AuthFailure::MissingToken => (ErrorCode::Unauthorized, "Missing authorization header"),
+            AuthFailure::MalformedToken => (
                 ErrorCode::Unauthorized,
                 "Malformed authorization header. Expected: Bearer <token>",
             ),
-            Self::InvalidToken => (ErrorCode::Unauthorized, "Invalid or expired token"),
-            Self::ServiceUnavailable => (
+            AuthFailure::InvalidToken => (ErrorCode::Unauthorized, "Invalid or expired token"),
+            AuthFailure::ServiceUnavailable => (
                 ErrorCode::DependencyUnavailable,
                 "Authentication service unavailable",
             ),

@@ -8,7 +8,8 @@ use shared::types::*;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::errors::ApiErrorResponse;
+use super::ApiErrorResponse;
+use crate::content;
 use crate::extractors::auth::AuthUser;
 use crate::extractors::content_path::ContentPath;
 use crate::middleware::rate_limit;
@@ -18,18 +19,12 @@ use crate::state::AppState;
 /// Used by handlers that receive content_type outside of path params
 /// (JSON body, query params) where ContentPath extractor doesn't apply.
 fn validate_content_type(state: &AppState, content_type: &str) -> Result<(), AppError> {
-    if !state.config().is_valid_content_type(content_type) {
-        return Err(AppError::ContentTypeUnknown(content_type.to_string()));
-    }
-    Ok(())
+    content::ensure_registered_content_type(state.config(), content_type)
 }
 
 /// Validate that all content types in a batch are registered.
 fn validate_batch_content_types(state: &AppState, items: &[BatchItem]) -> Result<(), AppError> {
-    for item in items {
-        validate_content_type(state, &item.content_type)?;
-    }
-    Ok(())
+    content::ensure_registered_batch_items(state.config(), items)
 }
 
 /// Extract (content_type, content_id) tuples from a batch request.

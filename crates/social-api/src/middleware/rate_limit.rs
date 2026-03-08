@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::state::AppState;
 
 /// Global atomic counter for rate limit ZSET members.
@@ -345,17 +345,27 @@ mod tests {
 
     // --- Redis Lua script tests (shared container) ---
 
-    async fn make_cache() -> CacheManager {
-        let redis = crate::test_containers::shared_redis().await;
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        cache: CacheManager,
+    }
+
+    async fn make_cache() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
         let mut config = crate::config::Config::new_for_test();
-        config.redis_url = redis.url.clone();
-        let pool = crate::cache::manager::create_pool(&config).await.unwrap();
-        CacheManager::new(pool)
+        config.redis_url = scope.redis_url.clone();
+        let pool = crate::cache::create_pool(&config).await.unwrap();
+        let cache = CacheManager::new(pool);
+        TestHarness {
+            _scope: scope,
+            cache,
+        }
     }
 
     #[tokio::test]
     async fn test_sliding_window_allows_under_limit() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
 
         let result = check_rate_limit_inner(&cache, "rl:test:allow", 10, 60).await;
         assert!(result.allowed);
@@ -365,7 +375,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sliding_window_blocks_over_limit() {
-        let cache = make_cache().await;
+        let harness = make_cache().await;
+        let cache = harness.cache;
 
         // Exhaust the limit of 3
         for _ in 0..3 {

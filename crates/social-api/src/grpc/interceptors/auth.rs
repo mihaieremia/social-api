@@ -1,12 +1,8 @@
-//! gRPC authentication helpers.
-//!
-//! Extracts bearer tokens from gRPC metadata and validates them via the
-//! `TokenValidator` trait + circuit breaker, mirroring the HTTP `AuthUser`
-//! extractor logic but adapted for tonic's async service method context.
+//! gRPC authentication helpers built on the shared auth flow.
 
-use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
 
+use crate::auth::{self as authentication, AuthFailure};
 use crate::clients::circuit_breaker::CircuitBreaker;
 use crate::clients::profile_client::TokenValidator;
 
@@ -21,11 +17,9 @@ pub fn extract_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, 
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| tonic::Status::unauthenticated("Missing authorization metadata"))?;
 
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| tonic::Status::unauthenticated("Invalid authorization format"))?;
-
-    Ok(token.to_string())
+    authentication::parse_bearer_token(auth)
+        .map(str::to_string)
+        .map_err(auth_failure_to_status)
 }
 
 /// Validate a bearer token through the profile service with circuit breaker
@@ -41,31 +35,22 @@ pub async fn validate_token(
     validator: &dyn TokenValidator,
     breaker: &CircuitBreaker,
 ) -> Result<AuthenticatedUser, tonic::Status> {
-    if !breaker.allow_request() {
-        return Err(tonic::Status::unavailable(
-            "Profile service circuit breaker is open",
-        ));
-    }
+    authentication::authenticate_token(token, validator, breaker)
+        .await
+        .map_err(auth_failure_to_status)
+}
 
-    match validator.validate(token).await {
-        Ok(user) => {
-            breaker.record_success();
-            Ok(user)
+fn auth_failure_to_status(error: AuthFailure) -> tonic::Status {
+    match error {
+        AuthFailure::MissingToken => {
+            tonic::Status::unauthenticated("Missing authorization metadata")
         }
-        Err(AppError::Unauthorized(msg)) => {
-            // Auth rejection is a successful call to the profile service
-            breaker.record_success();
-            Err(tonic::Status::unauthenticated(msg))
+        AuthFailure::MalformedToken => {
+            tonic::Status::unauthenticated("Invalid authorization format")
         }
-        Err(AppError::DependencyUnavailable(svc)) => {
-            breaker.record_failure();
-            Err(tonic::Status::unavailable(format!(
-                "External service unavailable: {svc}"
-            )))
-        }
-        Err(e) => {
-            breaker.record_failure();
-            Err(tonic::Status::internal(e.to_string()))
+        AuthFailure::InvalidToken => tonic::Status::unauthenticated("Invalid or expired token"),
+        AuthFailure::ServiceUnavailable => {
+            tonic::Status::unavailable("Authentication service unavailable")
         }
     }
 }
@@ -73,6 +58,7 @@ pub async fn validate_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::errors::AppError;
     use tonic::metadata::MetadataMap;
 
     #[test]
@@ -107,17 +93,13 @@ mod tests {
         let mut metadata = MetadataMap::new();
         metadata.insert("authorization", "Bearer ".parse().unwrap());
 
-        // "Bearer " is valid prefix; empty token is returned (validator will reject it)
-        let token = extract_token(&metadata).unwrap();
-        assert!(token.is_empty());
+        let err = extract_token(&metadata).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     // --- validate_token tests ---
 
     use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-    use crate::clients::profile_client::TokenValidator;
-    use shared::errors::AppError;
-    use shared::types::AuthenticatedUser;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -193,7 +175,7 @@ mod tests {
 
         let err = result.expect_err("should fail when breaker is open");
         assert_eq!(err.code(), tonic::Code::Unavailable);
-        assert!(err.message().contains("circuit breaker"));
+        assert!(err.message().contains("Authentication service unavailable"));
     }
 
     #[tokio::test]
@@ -227,7 +209,7 @@ mod tests {
 
         let err = result.expect_err("should fail when dependency is unavailable");
         assert_eq!(err.code(), tonic::Code::Unavailable);
-        assert!(err.message().contains("profile_api"));
+        assert!(err.message().contains("Authentication service unavailable"));
 
         // Verify the failure was recorded on the breaker (2 more failures should trip it)
         breaker.record_failure();

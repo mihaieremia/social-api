@@ -25,16 +25,25 @@ social-api/                      # Root
 ### Module Structure (crates/social-api/src/)
 ```
 main.rs                          # Entry: config, pools, server, shutdown
-config.rs                        # Env-based config with fail-fast
-server.rs                        # Axum Router + middleware layers
 state.rs                         # AppState (Arc<AppStateInner>: db, cache, config, http_client, like_service, token_validator, profile_breaker, pubsub_manager, shutdown_token, inflight_count)
 shutdown.rs                      # SIGTERM handler, drain, SSE close
 db.rs                            # DbPools (writer + reader PgPool)
 logging.rs                       # JSON tracing-subscriber init
 openapi.rs                       # utoipa OpenAPI spec + Swagger UI
+proto.rs                         # Compiled protobuf module entrypoint
+
+auth.rs                          # Shared auth flow for HTTP extractors and gRPC interceptors
+cache.rs                         # CacheManager: get/set/mget/publish/zrevrange/replace_sorted_set/invoke_script
+config.rs                        # Config struct + env-backed loading + env parsing helpers
+content.rs                       # Config-backed content type validation helpers
+health.rs                        # Shared dependency checks for HTTP + gRPC health
+realtime.rs                      # Shared SSE/gRPC event stream bridge
+repositories.rs                  # SQL for likes, counts, statuses, user likes, leaderboard
+server.rs                        # Axum Router + HTTP middleware layers + tonic server wiring
 
 handlers/
-  likes.rs                       # ALL like endpoints: like, unlike, get_count, get_status, get_user_likes, batch_counts, batch_statuses, get_leaderboard
+  mod.rs                         # ApiErrorResponse (Axum AppError -> JSON response adapter)
+  likes.rs                       # HTTP like endpoints: like, unlike, count, status, user likes, batch, leaderboard
   stream.rs                      # SSE endpoint
   health.rs                      # /health/live, /health/ready
   metrics_handler.rs             # /metrics (PrometheusHandle)
@@ -51,18 +60,19 @@ middleware/
   error_context.rs               # Patches request_id into error responses after handler runs
 
 services/
-  like_service.rs                # ALL business logic: like, unlike, count, status, batch, leaderboard, cursor pagination
+  like_service.rs                # Facade over like command/query/cache modules
+  like_commands.rs               # Like/unlike write workflows
+  like_queries.rs                # Read paths, pagination, leaderboard queries
+  like_count_cache.rs            # Count cache + stampede coalescing
+  like_events.rs                 # Event publication helpers
   pubsub_manager.rs              # Redis Pub/Sub subscription manager for SSE fan-out
 
-repositories/
-  like_repository.rs             # ALL SQL: insert_like, delete_like, get_count, get_status, get_user_likes, get_leaderboard
-
-cache/
-  manager.rs                     # CacheManager: get/set/mget/publish/zrevrange/replace_sorted_set/invoke_script
-
 grpc/
-  mod.rs                         # gRPC transport implementations
-  proto.rs                       # Compiled protobuf code for internal services
+  likes_service.rs               # gRPC LikeService transport layer
+  health_service.rs              # gRPC health transport layer
+  convert.rs                     # Domain <-> protobuf conversion helpers
+  error.rs                       # AppError -> tonic::Status mapping
+  interceptors/                  # gRPC request ID, auth, rate-limit, metrics helpers
 
 clients/
   content_client.rs              # ContentValidator trait + HttpContentValidator

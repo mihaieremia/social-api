@@ -1,7 +1,7 @@
 use shared::errors::AppError;
 use uuid::Uuid;
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::config::Config;
 
 /// Trait for content validation — transport-swappable (HTTP or gRPC via INTERNAL_TRANSPORT).

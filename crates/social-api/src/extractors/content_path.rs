@@ -5,8 +5,9 @@ use axum::{
 use shared::errors::AppError;
 use uuid::Uuid;
 
-use crate::errors::ApiErrorResponse;
+use crate::content;
 use crate::extractors::auth::FromRef;
+use crate::handlers::ApiErrorResponse;
 use crate::state::AppState;
 
 /// Extractor that validates content_type against the config registry and parses
@@ -32,9 +33,7 @@ where
                 .map_err(|_| AppError::InvalidContentId("Invalid path parameters".to_string()))?;
 
         // Validate content type against registry
-        if !app_state.config().is_valid_content_type(&content_type) {
-            return Err(AppError::ContentTypeUnknown(content_type).into());
-        }
+        content::ensure_registered_content_type(app_state.config(), &content_type)?;
 
         // Parse UUID
         let content_id = Uuid::parse_str(&content_id_str)

@@ -1,15 +1,18 @@
+mod auth;
 mod cache;
 mod clients;
 mod config;
+mod content;
 mod db;
-mod errors;
 mod extractors;
 mod grpc;
 mod handlers;
+mod health;
 mod logging;
 mod middleware;
 mod openapi;
 mod proto;
+mod realtime;
 mod repositories;
 mod server;
 mod services;
@@ -24,7 +27,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
-use cache::manager::{CacheManager, create_pool as create_redis_pool};
+use cache::{CacheManager, create_pool as create_redis_pool};
 use config::Config;
 use db::DbPools;
 use state::AppState;

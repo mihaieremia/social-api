@@ -3,10 +3,10 @@ use futures::future::join_all;
 use shared::types::TimeWindow;
 use tokio_util::sync::CancellationToken;
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::config::Config;
 use crate::db::DbPools;
-use crate::repositories::like_repository;
+use crate::repositories;
 
 /// All time windows the refresh task iterates over.
 const WINDOWS: [TimeWindow; 4] = [
@@ -100,7 +100,7 @@ async fn refresh_window(
         .duration_secs()
         .map(|secs| Utc::now() - Duration::seconds(secs));
 
-    let rows = like_repository::get_leaderboard(&db.reader, None, since, LEADERBOARD_LIMIT)
+    let rows = repositories::get_leaderboard(&db.reader, None, since, LEADERBOARD_LIMIT)
         .await
         .map_err(|e| format!("DB query failed for window {window}: {e}"))?;
 
@@ -147,22 +147,31 @@ pub async fn refresh_window_public(
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        db: DbPools,
+        cache: CacheManager,
+    }
+
     /// Return DbPools + CacheManager connected to the shared containers.
-    async fn setup() -> (DbPools, CacheManager) {
-        let pg = crate::test_containers::shared_pg().await;
-        let redis = crate::test_containers::shared_redis().await;
+    async fn setup() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
 
         let mut config = crate::config::Config::new_for_test();
-        config.database_url = pg.url.clone();
-        config.read_database_url = pg.url.clone();
-        config.redis_url = redis.url.clone();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
+        config.redis_url = scope.redis_url.clone();
 
         let db = DbPools::from_config(&config).await.unwrap();
 
-        let redis_pool = crate::cache::manager::create_pool(&config).await.unwrap();
+        let redis_pool = crate::cache::create_pool(&config).await.unwrap();
         let cache = CacheManager::new(redis_pool);
 
-        (db, cache)
+        TestHarness {
+            _scope: scope,
+            db,
+            cache,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -171,7 +180,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_all_windows_empty_db() {
-        let (db, cache) = setup().await;
+        let harness = setup().await;
+        let db = harness.db;
+        let cache = harness.cache;
 
         // Should not panic or return an error
         let result = refresh_all_windows(&db, &cache).await;
@@ -195,7 +206,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_window_populates_zset_with_data() {
-        let (db, cache) = setup().await;
+        let harness = setup().await;
+        let db = harness.db;
+        let cache = harness.cache;
 
         // Insert likes directly so the leaderboard query returns results
         let user_id = uuid::Uuid::new_v4();
@@ -245,7 +258,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_window_day_uses_likes_table() {
-        let (db, cache) = setup().await;
+        let harness = setup().await;
+        let db = harness.db;
+        let cache = harness.cache;
 
         // Insert two likes for content_a and one like for content_b
         let content_a = uuid::Uuid::new_v4();
@@ -303,7 +318,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_all_windows_covers_all_four_windows() {
-        let (db, cache) = setup().await;
+        let harness = setup().await;
+        let db = harness.db;
+        let cache = harness.cache;
 
         refresh_all_windows(&db, &cache).await.unwrap();
 
@@ -321,7 +338,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_leaderboard_refresh_cancels_on_shutdown() {
-        let (db, cache) = setup().await;
+        let harness = setup().await;
+        let db = harness.db;
+        let cache = harness.cache;
 
         let shutdown_token = CancellationToken::new();
         let mut config = crate::config::Config::new_for_test();

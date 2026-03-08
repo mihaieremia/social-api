@@ -10,7 +10,7 @@
 //!
 //! ```sh
 //! # Prerequisites
-//! docker compose up --build -d
+//! docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d
 //!
 //! # Run one test at a time (--test-threads=1 ensures sequential execution)
 //! cargo test --test graceful_shutdown_test -- --ignored --nocapture --test-threads=1
@@ -19,6 +19,9 @@
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
+
+#[path = "common/compose.rs"]
+mod compose;
 
 const BASE_URL: &str = "http://localhost:8080";
 const VALID_POST_ID: &str = "731b0395-4888-4822-b516-05b4b7bf2089";
@@ -34,7 +37,12 @@ fn client() -> Client {
 /// This delivers SIGTERM to PID 1 (the Rust binary) inside the container.
 async fn send_sigterm() {
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "kill", "-s", "SIGTERM", "social-api"])
+        .args(compose::compose_args(&[
+            "kill",
+            "-s",
+            "SIGTERM",
+            "social-api",
+        ]))
         .output()
         .await
         .expect("Failed to execute docker compose kill");
@@ -51,7 +59,12 @@ async fn restart_social_api() {
     // Wait for the container to fully exit (up to 10s)
     for _ in 0..20 {
         let output = tokio::process::Command::new("docker")
-            .args(["compose", "ps", "--format", "{{.State}}", "social-api"])
+            .args(compose::compose_args(&[
+                "ps",
+                "--format",
+                "{{.State}}",
+                "social-api",
+            ]))
             .output()
             .await
             .unwrap();
@@ -62,20 +75,13 @@ async fn restart_social_api() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Force recreate to get a clean container.
-    // Test binary CWD is crates/social-api/, so compose files are two levels up.
     let output = tokio::process::Command::new("docker")
-        .args([
-            "compose",
-            "-f",
-            "../../docker-compose.yml",
-            "-f",
-            "../../docker-compose.test.yml",
+        .args(compose::compose_args(&[
             "up",
             "-d",
             "--force-recreate",
             "social-api",
-        ])
+        ]))
         .output()
         .await
         .expect("Failed to restart social-api");
@@ -387,7 +393,12 @@ async fn test_graceful_shutdown_clean_exit() {
     let exited = tokio::time::timeout(Duration::from_secs(35), async {
         loop {
             let output = tokio::process::Command::new("docker")
-                .args(["compose", "ps", "--format", "json", "social-api"])
+                .args(compose::compose_args(&[
+                    "ps",
+                    "--format",
+                    "json",
+                    "social-api",
+                ]))
                 .output()
                 .await
                 .expect("Failed to check container status");
@@ -412,7 +423,13 @@ async fn test_graceful_shutdown_clean_exit() {
 
     // Check exit code from docker inspect
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "ps", "-a", "--format", "json", "social-api"])
+        .args(compose::compose_args(&[
+            "ps",
+            "-a",
+            "--format",
+            "json",
+            "social-api",
+        ]))
         .output()
         .await
         .unwrap();

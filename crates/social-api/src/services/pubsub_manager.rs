@@ -100,13 +100,15 @@ impl PubSubManager {
         tokio::spawn(async move {
             run_bridge_with_reconnect(&redis_url, &channel_name, &tx, &shutdown).await;
 
-            // Clean up: only remove if no receivers remain (avoid race with new subscriber)
-            if let Some(entry) = channels_ref.get(&channel_name)
-                && entry.value().receiver_count() == 0
-            {
+            // Clean up our sender registration after the bridge exits so future
+            // subscribers cannot reuse a dead sender after reconnect exhaustion.
+            if let Some(entry) = channels_ref.get(&channel_name) {
+                let should_remove = entry.value().same_channel(&tx);
                 drop(entry);
-                channels_ref.remove(&channel_name);
-                tracing::debug!(channel = %channel_name, "Removed idle Pub/Sub channel");
+                if should_remove {
+                    channels_ref.remove(&channel_name);
+                    tracing::debug!(channel = %channel_name, "Removed finished Pub/Sub channel");
+                }
             }
         });
 
@@ -275,16 +277,28 @@ async fn run_single_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        manager: PubSubManager,
+        redis_url: String,
+    }
+
     /// Return a PubSubManager + the Redis URL, backed by the shared container.
-    async fn make_manager() -> (PubSubManager, String) {
-        let redis = crate::test_containers::shared_redis().await;
-        let mgr = PubSubManager::new(redis.url.clone(), 16, CancellationToken::new());
-        (mgr, redis.url.clone())
+    async fn make_manager() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
+        let manager = PubSubManager::new(scope.redis_url.clone(), 16, CancellationToken::new());
+        TestHarness {
+            redis_url: scope.redis_url.clone(),
+            manager,
+            _scope: scope,
+        }
     }
 
     #[tokio::test]
     async fn test_subscribe_and_receive_message() {
-        let (mgr, redis_url) = make_manager().await;
+        let harness = make_manager().await;
+        let mgr = harness.manager;
+        let redis_url = harness.redis_url;
         let channel = "test:pubsub:recv";
 
         let mut rx = mgr.subscribe(channel).await.expect("subscribe");
@@ -319,7 +333,8 @@ mod tests {
         // This test verifies the DashMap channel-reuse logic.
         // We use a real Redis container so the bridge can connect and stay alive
         // long enough for the second subscribe to hit the fast path.
-        let (mgr, _redis_url) = make_manager().await;
+        let harness = make_manager().await;
+        let mgr = harness.manager;
         let channel = "test:pubsub:reuse";
 
         let _rx1 = mgr.subscribe(channel).await.expect("subscribe 1");
@@ -377,7 +392,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_messages_delivered_in_order() {
-        let (mgr, redis_url) = make_manager().await;
+        let harness = make_manager().await;
+        let mgr = harness.manager;
+        let redis_url = harness.redis_url;
         let channel = "test:pubsub:ordered";
 
         let mut rx = mgr.subscribe(channel).await.expect("subscribe");
@@ -413,8 +430,8 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_stops_message_forwarding() {
         let token = CancellationToken::new();
-        let redis = crate::test_containers::shared_redis().await;
-        let mgr = PubSubManager::new(redis.url.clone(), 16, token.clone());
+        let scope = crate::test_containers::isolated_scope().await;
+        let mgr = PubSubManager::new(scope.redis_url.clone(), 16, token.clone());
         let channel = "test:pubsub:shutdown";
 
         let mut rx = mgr.subscribe(channel).await.expect("subscribe");
@@ -423,7 +440,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // Verify messages are delivered before shutdown
-        let client = redis::Client::open(redis.url.as_str()).expect("client open");
+        let client = redis::Client::open(scope.redis_url.as_str()).expect("client open");
         let mut conn = client
             .get_multiplexed_async_connection()
             .await

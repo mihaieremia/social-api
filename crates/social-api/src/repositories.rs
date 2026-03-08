@@ -383,18 +383,19 @@ mod tests {
     use uuid::Uuid;
 
     /// Return a PgPool connected to the shared Postgres container.
-    async fn setup_pg() -> sqlx::PgPool {
-        let pg = crate::test_containers::shared_pg().await;
-        sqlx::postgres::PgPoolOptions::new()
+    async fn setup_pg() -> (sqlx::PgPool, crate::test_containers::TestScope) {
+        let scope = crate::test_containers::isolated_scope().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
-            .connect(&pg.url)
+            .connect(&scope.database_url)
             .await
-            .expect("connect test postgres")
+            .expect("connect test postgres");
+        (pool, scope)
     }
 
     #[tokio::test]
     async fn test_insert_like_new() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -414,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_like_idempotent() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -433,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_like_existing() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -449,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_like_not_existing() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let result = delete_like(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
             .await
             .unwrap();
@@ -458,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_count_after_likes() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let content_id = Uuid::new_v4();
         for _ in 0..3 {
             insert_like(&pool, Uuid::new_v4(), "post", content_id)
@@ -471,14 +472,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_count_zero_for_unknown_content() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let count = get_count(&pool, "post", Uuid::new_v4()).await.unwrap();
         assert_eq!(count, 0);
     }
 
     #[tokio::test]
     async fn test_get_like_status_liked() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 
@@ -494,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_like_status_not_liked() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let ts = get_like_status(&pool, Uuid::new_v4(), "post", Uuid::new_v4())
             .await
             .unwrap();
@@ -503,7 +504,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_get_statuses() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let liked_id = Uuid::new_v4();
         let not_liked_id = Uuid::new_v4();
@@ -532,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_likes_pagination() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         for _ in 0..5 {
             insert_like(&pool, user_id, "post", Uuid::new_v4())
@@ -568,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_leaderboard_ordered_by_count_desc() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         // Use a unique content_type so shared-DB data from other tests is excluded
         let ct = "lb_repo_test";
         let id1 = Uuid::new_v4();
@@ -592,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unique_constraint_enforced() {
-        let pool = setup_pg().await;
+        let (pool, _scope) = setup_pg().await;
         let user_id = Uuid::new_v4();
         let content_id = Uuid::new_v4();
 

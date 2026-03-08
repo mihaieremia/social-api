@@ -1,5 +1,51 @@
 use std::collections::HashMap;
-use std::env;
+use std::env as std_env;
+
+fn default_server_concurrency_limit(db_max_connections: u32, redis_pool_size: u32) -> usize {
+    let db_budget = (db_max_connections as usize).saturating_mul(4);
+    let redis_budget = (redis_pool_size as usize).saturating_mul(8);
+    db_budget.min(redis_budget).max(16)
+}
+
+/// Require an environment variable, recording its name if missing.
+fn require_env<'a>(name: &'a str, missing: &mut Vec<&'a str>) -> String {
+    match std_env::var(name) {
+        Ok(val) if !val.is_empty() => val,
+        _ => {
+            missing.push(name);
+            String::new()
+        }
+    }
+}
+
+/// Get an environment variable with a default value.
+fn env_or_default<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std_env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Scan environment for CONTENT_API_{TYPE}_URL variables.
+/// Extracts the TYPE portion, strips the prefix/suffix, and lowercases it.
+///
+/// Example: CONTENT_API_POST_URL -> ("post", "http://...")
+///          CONTENT_API_BONUS_HUNTER_URL -> ("bonus_hunter", "http://...")
+fn build_content_api_urls() -> HashMap<String, String> {
+    let mut urls = HashMap::new();
+
+    for (key, value) in std_env::vars() {
+        if let Some(type_name) = key
+            .strip_prefix("CONTENT_API_")
+            .and_then(|s| s.strip_suffix("_URL"))
+            && !value.is_empty()
+        {
+            urls.insert(type_name.to_lowercase(), value);
+        }
+    }
+
+    urls
+}
 
 /// Application configuration loaded from environment variables.
 /// Fails fast on startup if required variables are missing.
@@ -57,6 +103,8 @@ pub struct Config {
     /// Requests beyond this limit receive 503 Service Unavailable immediately,
     /// providing backpressure instead of queuing until timeout.
     pub server_concurrency_limit: usize,
+    /// Timeout for internal HTTP/gRPC dependency requests.
+    pub upstream_request_timeout_secs: u64,
 
     // Shutdown
     pub shutdown_timeout_secs: u64,
@@ -97,8 +145,8 @@ impl Config {
 
         let grpc_port: u16 = env_or_default("GRPC_PORT", 50051);
         let internal_transport =
-            env::var("INTERNAL_TRANSPORT").unwrap_or_else(|_| "http".to_string());
-        let internal_grpc_url = env::var("INTERNAL_GRPC_URL")
+            std_env::var("INTERNAL_TRANSPORT").unwrap_or_else(|_| "http".to_string());
+        let internal_grpc_url = std_env::var("INTERNAL_GRPC_URL")
             .unwrap_or_else(|_| "http://mock-services:50052".to_string());
 
         // Build content API URL map from CONTENT_API_{TYPE}_URL env vars
@@ -110,6 +158,13 @@ impl Config {
             );
         }
 
+        let db_max_connections: u32 = env_or_default("DB_MAX_CONNECTIONS", 20);
+        let redis_pool_size: u32 = env_or_default("REDIS_POOL_SIZE", 10);
+        let server_concurrency_limit = env_or_default(
+            "SERVER_CONCURRENCY_LIMIT",
+            default_server_concurrency_limit(db_max_connections, redis_pool_size),
+        );
+
         Self {
             database_url,
             read_database_url,
@@ -120,10 +175,10 @@ impl Config {
             internal_grpc_url,
             content_api_urls,
             profile_api_url,
-            db_max_connections: env_or_default("DB_MAX_CONNECTIONS", 20),
+            db_max_connections,
             db_min_connections: env_or_default("DB_MIN_CONNECTIONS", 5),
             db_acquire_timeout_secs: env_or_default("DB_ACQUIRE_TIMEOUT_SECS", 5),
-            redis_pool_size: env_or_default("REDIS_POOL_SIZE", 10),
+            redis_pool_size,
             rate_limit_write_per_minute: env_or_default("RATE_LIMIT_WRITE_PER_MINUTE", 30),
             rate_limit_read_per_minute: env_or_default("RATE_LIMIT_READ_PER_MINUTE", 1000),
             cache_ttl_like_counts_secs: env_or_default("CACHE_TTL_LIKE_COUNTS_SECS", 300),
@@ -148,7 +203,8 @@ impl Config {
                 "CIRCUIT_BREAKER_RATE_WINDOW_SECS",
                 30,
             ),
-            server_concurrency_limit: env_or_default("SERVER_CONCURRENCY_LIMIT", 10000),
+            server_concurrency_limit,
+            upstream_request_timeout_secs: env_or_default("UPSTREAM_REQUEST_TIMEOUT_SECS", 5),
             shutdown_timeout_secs: env_or_default("SHUTDOWN_TIMEOUT_SECS", 30),
             sse_heartbeat_interval_secs: env_or_default("SSE_HEARTBEAT_INTERVAL_SECS", 10),
             sse_broadcast_capacity: env_or_default("SSE_BROADCAST_CAPACITY", 128),
@@ -156,7 +212,7 @@ impl Config {
                 "LEADERBOARD_REFRESH_INTERVAL_SECS",
                 60,
             ),
-            log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
+            log_level: std_env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
         }
     }
 
@@ -212,53 +268,14 @@ impl Config {
             circuit_breaker_success_threshold: 2,
             circuit_breaker_rate_window_secs: 30,
             leaderboard_refresh_interval_secs: 300,
-            server_concurrency_limit: 10000,
+            server_concurrency_limit: default_server_concurrency_limit(5, 5),
+            upstream_request_timeout_secs: 5,
             shutdown_timeout_secs: 30,
             sse_heartbeat_interval_secs: 10,
             sse_broadcast_capacity: 128,
             log_level: "info".to_string(),
         }
     }
-}
-
-/// Require an environment variable, recording its name if missing.
-fn require_env<'a>(name: &'a str, missing: &mut Vec<&'a str>) -> String {
-    match env::var(name) {
-        Ok(val) if !val.is_empty() => val,
-        _ => {
-            missing.push(name);
-            String::new()
-        }
-    }
-}
-
-/// Get an environment variable with a default value.
-fn env_or_default<T: std::str::FromStr>(name: &str, default: T) -> T {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Scan environment for CONTENT_API_{TYPE}_URL variables.
-/// Extracts the TYPE portion, strips the prefix/suffix, and lowercases it.
-///
-/// Example: CONTENT_API_POST_URL -> ("post", "http://...")
-///          CONTENT_API_BONUS_HUNTER_URL -> ("bonus_hunter", "http://...")
-fn build_content_api_urls() -> HashMap<String, String> {
-    let mut urls = HashMap::new();
-
-    for (key, value) in env::vars() {
-        if let Some(type_name) = key
-            .strip_prefix("CONTENT_API_")
-            .and_then(|s| s.strip_suffix("_URL"))
-            && !value.is_empty()
-        {
-            urls.insert(type_name.to_lowercase(), value);
-        }
-    }
-
-    urls
 }
 
 #[cfg(test)]
@@ -277,10 +294,10 @@ mod tests {
     #[serial]
     fn test_env_or_default_with_invalid_value() {
         // SAFETY: Single-threaded test, no concurrent env access
-        unsafe { env::set_var("__TEST_INVALID_VAR__", "not_a_number") };
+        unsafe { std_env::set_var("__TEST_INVALID_VAR__", "not_a_number") };
         let result: u32 = env_or_default("__TEST_INVALID_VAR__", 42);
         assert_eq!(result, 42);
-        unsafe { env::remove_var("__TEST_INVALID_VAR__") };
+        unsafe { std_env::remove_var("__TEST_INVALID_VAR__") };
     }
 
     #[test]
@@ -338,6 +355,8 @@ mod tests {
         assert_eq!(config.grpc_port, 50051);
         assert_eq!(config.internal_transport, "http");
         assert!(!config.use_grpc_transport());
+        assert_eq!(config.server_concurrency_limit, 20);
+        assert_eq!(config.upstream_request_timeout_secs, 5);
         assert_eq!(config.rate_limit_write_per_minute, 30);
         assert_eq!(config.rate_limit_read_per_minute, 1000);
     }
@@ -353,32 +372,32 @@ mod tests {
     #[test]
     #[serial]
     fn test_require_env_with_empty_string_value() {
-        unsafe { env::set_var("__EMPTY_VAR_COVERAGE_TEST__", "") };
+        unsafe { std_env::set_var("__EMPTY_VAR_COVERAGE_TEST__", "") };
         let mut missing: Vec<&str> = Vec::new();
         let val = require_env("__EMPTY_VAR_COVERAGE_TEST__", &mut missing);
         assert_eq!(val, "");
         assert_eq!(missing, vec!["__EMPTY_VAR_COVERAGE_TEST__"]);
-        unsafe { env::remove_var("__EMPTY_VAR_COVERAGE_TEST__") };
+        unsafe { std_env::remove_var("__EMPTY_VAR_COVERAGE_TEST__") };
     }
 
     #[test]
     #[serial]
     fn test_require_env_with_present_value() {
-        unsafe { env::set_var("__PRESENT_VAR_COVERAGE_TEST__", "hello") };
+        unsafe { std_env::set_var("__PRESENT_VAR_COVERAGE_TEST__", "hello") };
         let mut missing: Vec<&str> = Vec::new();
         let val = require_env("__PRESENT_VAR_COVERAGE_TEST__", &mut missing);
         assert_eq!(val, "hello");
         assert!(missing.is_empty());
-        unsafe { env::remove_var("__PRESENT_VAR_COVERAGE_TEST__") };
+        unsafe { std_env::remove_var("__PRESENT_VAR_COVERAGE_TEST__") };
     }
 
     #[test]
     #[serial]
     fn test_build_content_api_urls_known_types() {
         unsafe {
-            env::set_var("CONTENT_API_POST_URL", "http://post-api");
-            env::set_var("CONTENT_API_BONUS_HUNTER_URL", "http://bonus-api");
-            env::set_var("CONTENT_API_TOP_PICKS_URL", "http://top-picks-api");
+            std_env::set_var("CONTENT_API_POST_URL", "http://post-api");
+            std_env::set_var("CONTENT_API_BONUS_HUNTER_URL", "http://bonus-api");
+            std_env::set_var("CONTENT_API_TOP_PICKS_URL", "http://top-picks-api");
         }
         let urls = build_content_api_urls();
         assert_eq!(urls.get("post"), Some(&"http://post-api".to_string()));
@@ -391,9 +410,9 @@ mod tests {
             Some(&"http://top-picks-api".to_string())
         );
         unsafe {
-            env::remove_var("CONTENT_API_POST_URL");
-            env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
-            env::remove_var("CONTENT_API_TOP_PICKS_URL");
+            std_env::remove_var("CONTENT_API_POST_URL");
+            std_env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
+            std_env::remove_var("CONTENT_API_TOP_PICKS_URL");
         }
     }
 
@@ -401,7 +420,7 @@ mod tests {
     #[serial]
     fn test_build_content_api_urls_unknown_extra_type() {
         unsafe {
-            env::set_var("CONTENT_API_NEWS_ARTICLE_URL", "http://news-api");
+            std_env::set_var("CONTENT_API_NEWS_ARTICLE_URL", "http://news-api");
         }
         let urls = build_content_api_urls();
         assert!(
@@ -413,7 +432,7 @@ mod tests {
             Some(&"http://news-api".to_string())
         );
         unsafe {
-            env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
+            std_env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
         }
     }
 
@@ -421,13 +440,13 @@ mod tests {
     #[serial]
     fn test_build_content_api_urls_empty_value_not_inserted() {
         unsafe {
-            env::set_var("CONTENT_API_POST_URL", "");
+            std_env::set_var("CONTENT_API_POST_URL", "");
         }
         let urls = build_content_api_urls();
         // Empty value should not be inserted
         assert!(!urls.contains_key("post"));
         unsafe {
-            env::remove_var("CONTENT_API_POST_URL");
+            std_env::remove_var("CONTENT_API_POST_URL");
         }
     }
 
@@ -435,32 +454,33 @@ mod tests {
     #[serial]
     fn test_from_env_success() {
         unsafe {
-            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("REDIS_URL", "redis://localhost");
-            env::set_var("HTTP_PORT", "8080");
-            env::set_var("PROFILE_API_URL", "http://localhost:8081");
-            env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
+            std_env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("REDIS_URL", "redis://localhost");
+            std_env::set_var("HTTP_PORT", "8080");
+            std_env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            std_env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
             // Override optional settings too
-            env::set_var("DB_MAX_CONNECTIONS", "10");
-            env::set_var("DB_MIN_CONNECTIONS", "2");
-            env::set_var("DB_ACQUIRE_TIMEOUT_SECS", "3");
-            env::set_var("REDIS_POOL_SIZE", "5");
-            env::set_var("RATE_LIMIT_WRITE_PER_MINUTE", "60");
-            env::set_var("RATE_LIMIT_READ_PER_MINUTE", "2000");
-            env::set_var("CACHE_TTL_LIKE_COUNTS_SECS", "600");
-            env::set_var("CACHE_TTL_CONTENT_VALIDATION_SECS", "7200");
-            env::set_var("CACHE_TTL_USER_STATUS_SECS", "120");
-            env::set_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "3");
-            env::set_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS", "15");
-            env::set_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD", "2");
-            env::set_var("SHUTDOWN_TIMEOUT_SECS", "20");
-            env::set_var("SSE_HEARTBEAT_INTERVAL_SECS", "10");
-            env::set_var("SSE_BROADCAST_CAPACITY", "128");
-            env::set_var("LEADERBOARD_REFRESH_INTERVAL_SECS", "30");
-            env::set_var("LOG_LEVEL", "debug");
-            env::set_var("GRPC_PORT", "50052");
-            env::set_var("INTERNAL_TRANSPORT", "grpc");
+            std_env::set_var("DB_MAX_CONNECTIONS", "10");
+            std_env::set_var("DB_MIN_CONNECTIONS", "2");
+            std_env::set_var("DB_ACQUIRE_TIMEOUT_SECS", "3");
+            std_env::set_var("REDIS_POOL_SIZE", "5");
+            std_env::set_var("RATE_LIMIT_WRITE_PER_MINUTE", "60");
+            std_env::set_var("RATE_LIMIT_READ_PER_MINUTE", "2000");
+            std_env::set_var("CACHE_TTL_LIKE_COUNTS_SECS", "600");
+            std_env::set_var("CACHE_TTL_CONTENT_VALIDATION_SECS", "7200");
+            std_env::set_var("CACHE_TTL_USER_STATUS_SECS", "120");
+            std_env::set_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "3");
+            std_env::set_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS", "15");
+            std_env::set_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD", "2");
+            std_env::set_var("SHUTDOWN_TIMEOUT_SECS", "20");
+            std_env::set_var("SSE_HEARTBEAT_INTERVAL_SECS", "10");
+            std_env::set_var("SSE_BROADCAST_CAPACITY", "128");
+            std_env::set_var("LEADERBOARD_REFRESH_INTERVAL_SECS", "30");
+            std_env::set_var("LOG_LEVEL", "debug");
+            std_env::set_var("GRPC_PORT", "50052");
+            std_env::set_var("INTERNAL_TRANSPORT", "grpc");
+            std_env::set_var("UPSTREAM_REQUEST_TIMEOUT_SECS", "7");
         }
 
         let config = Config::from_env();
@@ -484,7 +504,8 @@ mod tests {
         assert_eq!(config.circuit_breaker_failure_threshold, 3);
         assert_eq!(config.circuit_breaker_recovery_timeout_secs, 15);
         assert_eq!(config.circuit_breaker_success_threshold, 2);
-        assert_eq!(config.server_concurrency_limit, 10000);
+        assert_eq!(config.server_concurrency_limit, 40);
+        assert_eq!(config.upstream_request_timeout_secs, 7);
         assert_eq!(config.shutdown_timeout_secs, 20);
         assert_eq!(config.sse_heartbeat_interval_secs, 10);
         assert_eq!(config.sse_broadcast_capacity, 128);
@@ -492,31 +513,32 @@ mod tests {
         assert_eq!(config.log_level, "debug");
 
         unsafe {
-            env::remove_var("DATABASE_URL");
-            env::remove_var("READ_DATABASE_URL");
-            env::remove_var("REDIS_URL");
-            env::remove_var("HTTP_PORT");
-            env::remove_var("PROFILE_API_URL");
-            env::remove_var("CONTENT_API_POST_URL");
-            env::remove_var("DB_MAX_CONNECTIONS");
-            env::remove_var("DB_MIN_CONNECTIONS");
-            env::remove_var("DB_ACQUIRE_TIMEOUT_SECS");
-            env::remove_var("REDIS_POOL_SIZE");
-            env::remove_var("RATE_LIMIT_WRITE_PER_MINUTE");
-            env::remove_var("RATE_LIMIT_READ_PER_MINUTE");
-            env::remove_var("CACHE_TTL_LIKE_COUNTS_SECS");
-            env::remove_var("CACHE_TTL_CONTENT_VALIDATION_SECS");
-            env::remove_var("CACHE_TTL_USER_STATUS_SECS");
-            env::remove_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD");
-            env::remove_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS");
-            env::remove_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD");
-            env::remove_var("SHUTDOWN_TIMEOUT_SECS");
-            env::remove_var("SSE_HEARTBEAT_INTERVAL_SECS");
-            env::remove_var("SSE_BROADCAST_CAPACITY");
-            env::remove_var("LEADERBOARD_REFRESH_INTERVAL_SECS");
-            env::remove_var("LOG_LEVEL");
-            env::remove_var("GRPC_PORT");
-            env::remove_var("INTERNAL_TRANSPORT");
+            std_env::remove_var("DATABASE_URL");
+            std_env::remove_var("READ_DATABASE_URL");
+            std_env::remove_var("REDIS_URL");
+            std_env::remove_var("HTTP_PORT");
+            std_env::remove_var("PROFILE_API_URL");
+            std_env::remove_var("CONTENT_API_POST_URL");
+            std_env::remove_var("DB_MAX_CONNECTIONS");
+            std_env::remove_var("DB_MIN_CONNECTIONS");
+            std_env::remove_var("DB_ACQUIRE_TIMEOUT_SECS");
+            std_env::remove_var("REDIS_POOL_SIZE");
+            std_env::remove_var("RATE_LIMIT_WRITE_PER_MINUTE");
+            std_env::remove_var("RATE_LIMIT_READ_PER_MINUTE");
+            std_env::remove_var("CACHE_TTL_LIKE_COUNTS_SECS");
+            std_env::remove_var("CACHE_TTL_CONTENT_VALIDATION_SECS");
+            std_env::remove_var("CACHE_TTL_USER_STATUS_SECS");
+            std_env::remove_var("CIRCUIT_BREAKER_FAILURE_THRESHOLD");
+            std_env::remove_var("CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECS");
+            std_env::remove_var("CIRCUIT_BREAKER_SUCCESS_THRESHOLD");
+            std_env::remove_var("SHUTDOWN_TIMEOUT_SECS");
+            std_env::remove_var("SSE_HEARTBEAT_INTERVAL_SECS");
+            std_env::remove_var("SSE_BROADCAST_CAPACITY");
+            std_env::remove_var("LEADERBOARD_REFRESH_INTERVAL_SECS");
+            std_env::remove_var("LOG_LEVEL");
+            std_env::remove_var("GRPC_PORT");
+            std_env::remove_var("INTERNAL_TRANSPORT");
+            std_env::remove_var("UPSTREAM_REQUEST_TIMEOUT_SECS");
         }
     }
 
@@ -526,11 +548,11 @@ mod tests {
     fn test_from_env_panics_on_missing_required_vars() {
         // Ensure required vars are not set
         unsafe {
-            env::remove_var("DATABASE_URL");
-            env::remove_var("READ_DATABASE_URL");
-            env::remove_var("REDIS_URL");
-            env::remove_var("HTTP_PORT");
-            env::remove_var("PROFILE_API_URL");
+            std_env::remove_var("DATABASE_URL");
+            std_env::remove_var("READ_DATABASE_URL");
+            std_env::remove_var("REDIS_URL");
+            std_env::remove_var("HTTP_PORT");
+            std_env::remove_var("PROFILE_API_URL");
         }
         Config::from_env();
     }
@@ -540,21 +562,21 @@ mod tests {
     #[should_panic(expected = "HTTP_PORT must be a valid port number")]
     fn test_from_env_panics_on_invalid_http_port() {
         unsafe {
-            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("REDIS_URL", "redis://localhost");
-            env::set_var("HTTP_PORT", "not_a_port");
-            env::set_var("PROFILE_API_URL", "http://localhost:8081");
-            env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
+            std_env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("REDIS_URL", "redis://localhost");
+            std_env::set_var("HTTP_PORT", "not_a_port");
+            std_env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            std_env::set_var("CONTENT_API_POST_URL", "http://localhost:8081");
         }
         let _config = Config::from_env();
         unsafe {
-            env::remove_var("DATABASE_URL");
-            env::remove_var("READ_DATABASE_URL");
-            env::remove_var("REDIS_URL");
-            env::remove_var("HTTP_PORT");
-            env::remove_var("PROFILE_API_URL");
-            env::remove_var("CONTENT_API_POST_URL");
+            std_env::remove_var("DATABASE_URL");
+            std_env::remove_var("READ_DATABASE_URL");
+            std_env::remove_var("REDIS_URL");
+            std_env::remove_var("HTTP_PORT");
+            std_env::remove_var("PROFILE_API_URL");
+            std_env::remove_var("CONTENT_API_POST_URL");
         }
     }
 
@@ -586,16 +608,16 @@ mod tests {
     #[should_panic(expected = "No content API URLs configured")]
     fn test_from_env_panics_when_no_content_api_urls() {
         unsafe {
-            env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
-            env::set_var("REDIS_URL", "redis://localhost");
-            env::set_var("HTTP_PORT", "8080");
-            env::set_var("PROFILE_API_URL", "http://localhost:8081");
+            std_env::set_var("DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("READ_DATABASE_URL", "postgres://x:x@localhost/x");
+            std_env::set_var("REDIS_URL", "redis://localhost");
+            std_env::set_var("HTTP_PORT", "8080");
+            std_env::set_var("PROFILE_API_URL", "http://localhost:8081");
             // Intentionally NOT setting any CONTENT_API_*_URL vars
-            env::remove_var("CONTENT_API_POST_URL");
-            env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
-            env::remove_var("CONTENT_API_TOP_PICKS_URL");
-            env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
+            std_env::remove_var("CONTENT_API_POST_URL");
+            std_env::remove_var("CONTENT_API_BONUS_HUNTER_URL");
+            std_env::remove_var("CONTENT_API_TOP_PICKS_URL");
+            std_env::remove_var("CONTENT_API_NEWS_ARTICLE_URL");
         }
         Config::from_env();
     }

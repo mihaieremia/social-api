@@ -10,11 +10,12 @@
 //! Zero business logic duplication -- all logic stays in `LikeService`.
 
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use tonic::{Code, Request, Response, Status};
 
+use crate::content;
 use crate::grpc::convert::{self, extract_content_refs, from_proto_window, parse_uuid};
 use crate::grpc::error::IntoStatus;
 use crate::grpc::interceptors::auth;
@@ -23,6 +24,7 @@ use crate::grpc::interceptors::rate_limit;
 use crate::middleware::rate_limit as mw_rate_limit;
 use crate::proto::social_v1;
 use crate::proto::social_v1::like_service_server::LikeService as LikeServiceProto;
+use crate::realtime::{self as streaming, LikeStreamItem};
 use crate::state::AppState;
 
 /// gRPC implementation of `social.v1.LikeService`.
@@ -131,12 +133,7 @@ impl GrpcLikeService {
     /// Validate content type against config registry.
     #[allow(clippy::result_large_err)]
     fn validate_content_type(&self, content_type: &str) -> Result<(), Status> {
-        if !self.state.config().is_valid_content_type(content_type) {
-            return Err(Status::invalid_argument(format!(
-                "Unknown content type: {content_type}"
-            )));
-        }
-        Ok(())
+        content::ensure_registered_content_type(self.state.config(), content_type).into_status()
     }
 
     #[allow(clippy::result_large_err)]
@@ -302,9 +299,11 @@ impl LikeServiceProto for GrpcLikeService {
             let inner = req.into_inner();
             let refs = extract_content_refs(&inner.items)?;
 
-            for (ct, _) in &refs {
-                self.validate_content_type(ct)?;
-            }
+            content::ensure_registered_content_types(
+                self.state.config(),
+                refs.iter().map(|(ct, _)| ct.as_str()),
+            )
+            .into_status()?;
 
             let results = self
                 .state
@@ -341,9 +340,11 @@ impl LikeServiceProto for GrpcLikeService {
             let inner = req.into_inner();
             let refs = extract_content_refs(&inner.items)?;
 
-            for (ct, _) in &refs {
-                self.validate_content_type(ct)?;
-            }
+            content::ensure_registered_content_types(
+                self.state.config(),
+                refs.iter().map(|(ct, _)| ct.as_str()),
+            )
+            .into_status()?;
 
             let results = self
                 .state
@@ -485,83 +486,43 @@ impl LikeServiceProto for GrpcLikeService {
             let shutdown_token = self.state.shutdown_token().clone();
             let pubsub_manager = self.state.pubsub_manager().clone();
 
-            let mut rx = pubsub_manager
-                .subscribe(&channel)
+            let rx = streaming::subscribe_like_events(&pubsub_manager, &channel)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to subscribe to pubsub: {e}")))?;
 
-            let stream = async_stream::stream! {
-                let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs));
+            let stream = streaming::create_like_event_stream(rx, channel.clone(), heartbeat_secs, shutdown_token)
+                .filter_map(move |item| {
+                    let content_type = content_type.clone();
+                    let content_id_str = content_id_str.clone();
+                    let channel = channel.clone();
 
-                loop {
-                    tokio::select! {
-                        _ = shutdown_token.cancelled() => {
-                            let event = shared::types::LikeEvent::Shutdown {
-                                timestamp: chrono::Utc::now(),
-                            };
-                            let proto: social_v1::LikeEvent = event.into();
-                            yield Ok(proto);
-                            break;
-                        }
-                        _ = heartbeat.tick() => {
-                            let event = shared::types::LikeEvent::Heartbeat {
-                                timestamp: chrono::Utc::now(),
-                            };
-                            let proto: social_v1::LikeEvent = event.into();
-                            yield Ok(proto);
-                        }
-                        result = rx.recv() => {
-                            match result {
-                                Ok(payload) => {
-                                    match serde_json::from_str::<shared::types::LikeEvent>(&payload) {
-                                        Ok(domain_event) => {
-                                            let mut proto: social_v1::LikeEvent = domain_event.into();
-                                            // Fill in content_type and content_id for Liked/Unliked events
-                                            if let Some(event) = &mut proto.event {
-                                                match event {
-                                                    social_v1::like_event::Event::Liked(occurred) => {
-                                                        occurred.content_type = content_type.clone();
-                                                        occurred.content_id = content_id_str.clone();
-                                                    }
-                                                    social_v1::like_event::Event::Unliked(occurred) => {
-                                                        occurred.content_type = content_type.clone();
-                                                        occurred.content_id = content_id_str.clone();
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            yield Ok(proto);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                channel = %channel,
-                                                "Failed to deserialize LikeEvent from pubsub payload"
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::debug!(
-                                        channel = %channel,
-                                        skipped = n,
-                                        "gRPC stream client lagged, skipped messages"
-                                    );
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                    // Bridge task ended
-                                    let event = shared::types::LikeEvent::Shutdown {
+                    async move {
+                        match item {
+                            LikeStreamItem::Event(domain_event) => {
+                                let proto = convert::to_proto_stream_event(
+                                    domain_event,
+                                    &content_type,
+                                    &content_id_str,
+                                );
+                                Some(Ok(proto))
+                            }
+                            LikeStreamItem::Lagged(skipped) => {
+                                tracing::debug!(channel = %channel, skipped, "gRPC stream client lagged, skipped messages");
+                                None
+                            }
+                            LikeStreamItem::Closed => {
+                                let proto = convert::to_proto_stream_event(
+                                    shared::types::LikeEvent::Shutdown {
                                         timestamp: chrono::Utc::now(),
-                                    };
-                                    let proto: social_v1::LikeEvent = event.into();
-                                    yield Ok(proto);
-                                    break;
-                                }
+                                    },
+                                    &content_type,
+                                    &content_id_str,
+                                );
+                                Some(Ok(proto))
                             }
                         }
                     }
-                }
-            };
+                });
 
             Ok(Response::new(Box::pin(stream) as Self::StreamLikesStream))
         }

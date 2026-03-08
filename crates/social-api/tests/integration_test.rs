@@ -2,10 +2,14 @@
 //!
 //! These tests require running Postgres, Redis, and mock services.
 //! Run with: `cargo test --test integration_test -- --ignored`
-//! Prerequisites: `docker compose up postgres redis mock-services`
+//! Prerequisites:
+//! `docker compose -f docker-compose.yml -f docker-compose.test.yml up postgres redis mock-services`
 
 use reqwest::Client;
 use serde_json::{Value, json};
+
+#[path = "common/compose.rs"]
+mod compose;
 
 const BASE_URL: &str = "http://localhost:8080";
 const MOCK_URL: &str = "http://localhost:8081";
@@ -830,7 +834,12 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
     // never hits the (stopped) profile API, so the breaker never trips.
     eprintln!("[CB] Flushing Redis to clear cached auth tokens...");
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "exec", "redis", "redis-cli", "FLUSHALL"])
+        .args(compose::compose_args(&[
+            "exec",
+            "redis",
+            "redis-cli",
+            "FLUSHALL",
+        ]))
         .output()
         .await
         .expect("Failed to flush Redis");
@@ -847,7 +856,7 @@ async fn test_circuit_breaker_trips_on_profile_api_failure() {
     // ── Cleanup: Always restart mock-services ──
     eprintln!("[CB] Cleanup: restarting mock-services...");
     let _ = tokio::process::Command::new("docker")
-        .args(["compose", "start", "mock-services"])
+        .args(compose::compose_args(&["start", "mock-services"]))
         .output()
         .await;
 
@@ -882,7 +891,7 @@ async fn circuit_breaker_test_body() {
     // ── Phase 1: Stop mock-services to simulate dependency failure ──
     eprintln!("[CB] Stopping mock-services...");
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "stop", "mock-services"])
+        .args(compose::compose_args(&["stop", "mock-services"]))
         .output()
         .await
         .expect("Failed to stop mock-services");
@@ -961,7 +970,7 @@ async fn circuit_breaker_test_body() {
     // ── Phase 4: Restart mock-services ──
     eprintln!("[CB] Restarting mock-services...");
     let output = tokio::process::Command::new("docker")
-        .args(["compose", "start", "mock-services"])
+        .args(compose::compose_args(&["start", "mock-services"]))
         .output()
         .await
         .expect("Failed to start mock-services");

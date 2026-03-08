@@ -80,15 +80,21 @@ mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
 
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        db: DbPools,
+    }
+
     /// Return DbPools connected to the shared Postgres container.
-    async fn setup_db() -> DbPools {
-        let pg = crate::test_containers::shared_pg().await;
+    async fn setup_db() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
 
         let mut config = crate::config::Config::new_for_test();
-        config.database_url = pg.url.clone();
-        config.read_database_url = pg.url.clone();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
 
-        DbPools::from_config(&config).await.expect("db pools")
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        TestHarness { _scope: scope, db }
     }
 
     // -------------------------------------------------------------------------
@@ -97,7 +103,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_pool_metrics_does_not_panic() {
-        let db = setup_db().await;
+        let harness = setup_db().await;
+        let db = harness.db;
         // Should complete without panicking regardless of whether a metrics
         // recorder is installed (metrics crate no-ops when none is registered).
         record_pool_metrics(&db, 5);
@@ -109,7 +116,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_pool_metrics_various_max_connections() {
-        let db = setup_db().await;
+        let harness = setup_db().await;
+        let db = harness.db;
         for max in [1, 5, 20, 100] {
             record_pool_metrics(&db, max);
         }
@@ -121,7 +129,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_db_pool_metrics_cancels_on_shutdown() {
-        let db = setup_db().await;
+        let harness = setup_db().await;
+        let db = harness.db;
 
         let config = crate::config::Config::new_for_test();
         let shutdown_token = CancellationToken::new();
@@ -144,7 +153,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_size_values_are_sane() {
-        let db = setup_db().await;
+        let harness = setup_db().await;
+        let db = harness.db;
 
         // Verify the pool size metrics are readable without overflow
         let writer_total = db.writer.size();

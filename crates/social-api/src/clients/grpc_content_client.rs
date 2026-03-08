@@ -4,9 +4,10 @@
 //! Caches results identically to the HTTP implementation.
 
 use shared::errors::AppError;
+use std::time::Duration;
 use uuid::Uuid;
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::config::Config;
 use crate::proto::internal_v1;
 use crate::proto::internal_v1::content_service_client::ContentServiceClient;
@@ -16,6 +17,7 @@ pub struct GrpcContentValidator {
     client: ContentServiceClient<tonic::transport::Channel>,
     cache: CacheManager,
     config: Config,
+    request_timeout: Duration,
 }
 
 impl GrpcContentValidator {
@@ -23,6 +25,7 @@ impl GrpcContentValidator {
         endpoint: &str,
         cache: CacheManager,
         config: Config,
+        request_timeout: Duration,
     ) -> Result<Self, AppError> {
         let client = ContentServiceClient::connect(endpoint.to_string())
             .await
@@ -32,6 +35,7 @@ impl GrpcContentValidator {
             client,
             cache,
             config,
+            request_timeout,
         })
     }
 
@@ -51,16 +55,18 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
 
         let start = std::time::Instant::now();
         let mut client = self.client.clone();
-        let response = client
-            .validate(internal_v1::ValidateContentRequest {
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            client.validate(internal_v1::ValidateContentRequest {
                 content_type: content_type.to_string(),
                 content_id: content_id.to_string(),
-            })
-            .await;
+            }),
+        )
+        .await;
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 let valid = resp.into_inner().exists;
                 super::metrics::record_external_call(
                     "content_api",
@@ -80,7 +86,7 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
 
                 Ok(valid)
             }
-            Err(status) => {
+            Ok(Err(status)) => {
                 super::metrics::record_external_call(
                     "content_api",
                     "validate_grpc",
@@ -92,6 +98,15 @@ impl super::content_client::ContentValidator for GrpcContentValidator {
                     transport = "grpc",
                     error = %status,
                     "Content API gRPC request failed"
+                );
+                Err(AppError::DependencyUnavailable("content_api".to_string()))
+            }
+            Err(_) => {
+                super::metrics::record_external_call(
+                    "content_api",
+                    "validate_grpc",
+                    "timeout".to_string(),
+                    latency,
                 );
                 Err(AppError::DependencyUnavailable("content_api".to_string()))
             }

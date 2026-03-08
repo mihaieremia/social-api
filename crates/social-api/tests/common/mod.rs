@@ -1,104 +1,58 @@
 #![allow(dead_code)]
 //! Shared test infrastructure for in-process axum tests.
 //!
-//! `TestApp::new()` spins up real Postgres and Redis via testcontainers,
-//! runs all migrations, then builds the full Axum router with stub
-//! implementations of the external dependencies (token validator, content
-//! validator).
+//! `TestApp::new()` connects to the shared Postgres and Redis test services,
+//! resets them under a cross-process advisory lock, then builds the full Axum
+//! router with stub external dependencies.
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
+use axum::{Router, routing::get};
 use http_body_util::BodyExt as _;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
-use testcontainers::runners::AsyncRunner;
-use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use social_api::cache::manager::{CacheManager, create_pool};
 use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use social_api::clients::content_client::ContentValidator;
 use social_api::clients::profile_client::TokenValidator;
-use social_api::config::Config;
-use social_api::db::DbPools;
 use social_api::server::{build_grpc_server, build_router};
 use social_api::services::like_service::LikeService;
 use social_api::state::AppState;
 use tokio::net::TcpListener;
 
-// ── Shared containers for integration tests ──────────────────────────────────
+pub mod infra;
 
-struct SharedContainers {
-    _pg: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
-    _redis: testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    db_url: String,
-    redis_url: String,
-}
-
-static CONTAINERS: OnceCell<SharedContainers> = OnceCell::const_new();
-
-async fn shared_containers() -> &'static SharedContainers {
-    CONTAINERS
-        .get_or_init(|| async {
-            let pg = testcontainers_modules::postgres::Postgres::default()
-                .start()
-                .await
-                .expect("postgres container");
-            let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-            let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-            let redis = testcontainers_modules::redis::Redis::default()
-                .start()
-                .await
-                .expect("redis container");
-            let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-            let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-            // Run migrations once
-            let pool = sqlx::PgPool::connect(&db_url).await.expect("pg connect");
-            sqlx::migrate!("../../migrations")
-                .run(&pool)
-                .await
-                .expect("migrations");
-            pool.close().await;
-
-            SharedContainers {
-                _pg: pg,
-                _redis: redis,
-                db_url,
-                redis_url,
-            }
-        })
-        .await
-}
-
-/// A fully wired axum router backed by real Postgres + Redis containers,
+/// A fully wired axum router backed by shared Postgres + Redis test services,
 /// plus a tonic gRPC server on a random port.
-#[allow(dead_code)]
 pub struct TestApp {
     pub router: axum::Router,
     pub grpc_addr: std::net::SocketAddr,
     _grpc_handle: tokio::task::JoinHandle<()>,
+    _content_health_handle: tokio::task::JoinHandle<()>,
+    _context: infra::TestContext,
 }
 
 impl TestApp {
     pub async fn new() -> Self {
-        let containers = shared_containers().await;
+        let mut context = infra::TestContext::new().await;
 
-        let mut config = Config::new_for_test();
-        config.database_url = containers.db_url.clone();
-        config.read_database_url = containers.db_url.clone();
-        config.redis_url = containers.redis_url.clone();
-
-        let db = DbPools::from_config(&config).await.expect("db pools");
-
-        let redis_pool = create_pool(&config).await.expect("redis pool");
-        let cache = CacheManager::new(redis_pool);
+        let content_health_router = Router::new().route("/health", get(|| async { "ok" }));
+        let content_health_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("content health listener");
+        let content_health_addr = content_health_listener
+            .local_addr()
+            .expect("content health local addr");
+        let content_health_url = format!("http://{content_health_addr}");
+        for url in context.config.content_api_urls.values_mut() {
+            url.clone_from(&content_health_url);
+        }
 
         let content_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 5,
@@ -111,19 +65,19 @@ impl TestApp {
         }));
 
         let like_service = LikeService::new_with_validator(
-            db.clone(),
-            cache.clone(),
+            context.db.clone(),
+            context.cache.clone(),
             Arc::new(TestContentValidator),
-            config.clone(),
+            context.config.clone(),
             content_breaker,
         );
 
         let shutdown_token = CancellationToken::new();
 
         let state = AppState::new_for_test(
-            db.clone(),
-            cache.clone(),
-            config,
+            context.db.clone(),
+            context.cache.clone(),
+            context.config.clone(),
             shutdown_token,
             Box::new(TestTokenValidator),
             like_service,
@@ -149,13 +103,21 @@ impl TestApp {
                 .expect("grpc serve");
         });
 
+        let _content_health_handle = tokio::spawn(async move {
+            axum::serve(content_health_listener, content_health_router)
+                .await
+                .expect("content health serve");
+        });
+
         // Give the server a moment to bind
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         TestApp {
             router,
             grpc_addr,
+            _context: context,
             _grpc_handle,
+            _content_health_handle,
         }
     }
 
@@ -167,6 +129,13 @@ impl TestApp {
             .oneshot(req)
             .await
             .expect("router oneshot failed")
+    }
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        self._grpc_handle.abort();
+        self._content_health_handle.abort();
     }
 }
 

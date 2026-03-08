@@ -5,9 +5,10 @@
 
 use shared::errors::AppError;
 use shared::types::AuthenticatedUser;
+use std::time::Duration;
 use uuid::Uuid;
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::clients::profile_client::TokenValidator;
 use crate::middleware::rate_limit::fnv1a_hash;
 use crate::proto::internal_v1;
@@ -18,6 +19,7 @@ pub struct GrpcTokenValidator {
     client: ProfileServiceClient<tonic::transport::Channel>,
     cache: CacheManager,
     cache_ttl_secs: u64,
+    request_timeout: Duration,
 }
 
 impl GrpcTokenValidator {
@@ -25,6 +27,7 @@ impl GrpcTokenValidator {
         endpoint: &str,
         cache: CacheManager,
         cache_ttl_secs: u64,
+        request_timeout: Duration,
     ) -> Result<Self, AppError> {
         let client = ProfileServiceClient::connect(endpoint.to_string())
             .await
@@ -34,6 +37,7 @@ impl GrpcTokenValidator {
             client,
             cache,
             cache_ttl_secs,
+            request_timeout,
         })
     }
 
@@ -55,15 +59,17 @@ impl TokenValidator for GrpcTokenValidator {
 
         let start = std::time::Instant::now();
         let mut client = self.client.clone();
-        let response = client
-            .validate_token(internal_v1::ValidateTokenRequest {
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            client.validate_token(internal_v1::ValidateTokenRequest {
                 token: token.to_string(),
-            })
-            .await;
+            }),
+        )
+        .await;
         let latency = start.elapsed().as_secs_f64();
 
         match response {
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 let inner = resp.into_inner();
                 super::metrics::record_external_call(
                     "profile_api",
@@ -93,7 +99,7 @@ impl TokenValidator for GrpcTokenValidator {
 
                 Ok(user)
             }
-            Err(status) => {
+            Ok(Err(status)) => {
                 super::metrics::record_external_call(
                     "profile_api",
                     "validate_grpc",
@@ -107,6 +113,15 @@ impl TokenValidator for GrpcTokenValidator {
                     ));
                 }
 
+                Err(AppError::DependencyUnavailable("profile_api".to_string()))
+            }
+            Err(_) => {
+                super::metrics::record_external_call(
+                    "profile_api",
+                    "validate_grpc",
+                    "timeout".to_string(),
+                    latency,
+                );
                 Err(AppError::DependencyUnavailable("profile_api".to_string()))
             }
         }

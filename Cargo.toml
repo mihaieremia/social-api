@@ -11,7 +11,6 @@ authors = ["BeInCrypto"]
 [workspace.dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
-axum-extra = { version = "0.12", features = ["typed-header"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "timeout", "compression-gzip"] }
 
@@ -47,7 +46,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 thiserror = "2"
-anyhow = "1"
 
 # OpenAPI
 utoipa = { version = "5", features = ["chrono", "uuid"] }
@@ -58,7 +56,6 @@ dashmap = "6"
 
 # gRPC
 tonic = "0.13"
-tonic-health = "0.13"
 prost = "0.13"
 prost-types = "0.13"
 tonic-build = "0.13"

@@ -13,7 +13,7 @@ pub trait TokenValidator: Send + Sync {
 pub struct HttpTokenValidator {
     http_client: reqwest::Client,
     profile_api_url: String,
-    cache: crate::cache::manager::CacheManager,
+    cache: crate::cache::CacheManager,
     cache_ttl_secs: u64,
 }
 
@@ -21,7 +21,7 @@ impl HttpTokenValidator {
     pub fn new(
         http_client: reqwest::Client,
         profile_api_url: String,
-        cache: crate::cache::manager::CacheManager,
+        cache: crate::cache::CacheManager,
         cache_ttl_secs: u64,
     ) -> Self {
         Self {

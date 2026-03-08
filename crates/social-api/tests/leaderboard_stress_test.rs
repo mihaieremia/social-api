@@ -4,7 +4,8 @@
 //! benchmarks `refresh_all_windows` and individual window refreshes to
 //! measure wall-clock latency, DB query cost, and Redis write throughput.
 //!
-//! **Requires Docker** (testcontainers for Postgres + Redis).
+//! Uses shared Postgres + Redis test services. Start them once with Docker
+//! Compose before running this suite.
 //!
 //! Run with defaults (10K likes, 500 content items):
 //!   cargo test --test leaderboard_stress_test -- --ignored --nocapture
@@ -19,77 +20,17 @@
 //!   STRESS_CONTENT_TYPES  — Number of content types (default: 3)
 //!   STRESS_REFRESH_RUNS   — How many refresh cycles to time (default: 5)
 
-use social_api::cache::manager::{CacheManager, create_pool};
-use social_api::config::Config;
 use social_api::db::DbPools;
 use social_api::tasks::leaderboard_refresh;
 
 use std::time::Instant;
-use testcontainers::runners::AsyncRunner;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Infrastructure setup (own containers — integration tests can't use #[cfg(test)] modules)
-// ---------------------------------------------------------------------------
+#[path = "common/infra.rs"]
+mod infra;
 
-struct SharedContainers {
-    _pg: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
-    _redis: testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    db_url: String,
-    redis_url: String,
-}
-
-static CONTAINERS: OnceCell<SharedContainers> = OnceCell::const_new();
-
-async fn shared_containers() -> &'static SharedContainers {
-    CONTAINERS
-        .get_or_init(|| async {
-            let pg = testcontainers_modules::postgres::Postgres::default()
-                .start()
-                .await
-                .expect("postgres container");
-            let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-            let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-            let redis = testcontainers_modules::redis::Redis::default()
-                .start()
-                .await
-                .expect("redis container");
-            let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-            let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-            // Run migrations once
-            let pool = sqlx::PgPool::connect(&db_url).await.expect("pg connect");
-            sqlx::migrate!("../../migrations")
-                .run(&pool)
-                .await
-                .expect("migrations");
-            pool.close().await;
-
-            SharedContainers {
-                _pg: pg,
-                _redis: redis,
-                db_url,
-                redis_url,
-            }
-        })
-        .await
-}
-
-async fn setup() -> (DbPools, CacheManager) {
-    let containers = shared_containers().await;
-
-    let mut config = Config::new_for_test();
-    config.database_url = containers.db_url.clone();
-    config.read_database_url = containers.db_url.clone();
-    config.redis_url = containers.redis_url.clone();
-
-    let db = DbPools::from_config(&config).await.unwrap();
-    let redis_pool = create_pool(&config).await.unwrap();
-    let cache = CacheManager::new(redis_pool);
-
-    (db, cache)
+async fn setup() -> infra::TestContext {
+    infra::TestContext::new().await
 }
 
 fn env_or(name: &str, default: usize) -> usize {
@@ -231,7 +172,9 @@ async fn test_leaderboard_refresh_under_load() {
         total_likes, num_items, num_types, num_runs
     );
 
-    let (db, cache) = setup().await;
+    let context = setup().await;
+    let db = context.db.clone();
+    let cache = context.cache.clone();
     let _items = seed_likes(&db, total_likes, num_items, num_types).await;
 
     // Verify data was seeded correctly

@@ -9,12 +9,12 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use shared::errors::AppError;
 use std::convert::Infallible;
-use std::time::Duration;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::errors::ApiErrorResponse;
+use super::ApiErrorResponse;
+use crate::content;
+use crate::realtime::{self as streaming, LikeStreamItem};
 use crate::services::pubsub_manager::PubSubManager;
 use crate::state::AppState;
 
@@ -43,10 +43,7 @@ pub async fn like_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    // Validate content_type against registered types
-    if !state.config().is_valid_content_type(&params.content_type) {
-        return Err(AppError::ContentTypeUnknown(params.content_type.clone()).into());
-    }
+    content::ensure_registered_content_type(state.config(), &params.content_type)?;
 
     // Validate content_id is a valid UUID
     let _content_id: Uuid = params.content_id.parse().map_err(|_| {
@@ -86,7 +83,7 @@ fn create_sse_stream(
         let _guard = SseGuard;
 
         // Subscribe via the shared PubSubManager (one Redis conn per channel)
-        let mut rx: broadcast::Receiver<String> = match pubsub_manager.subscribe(&channel).await {
+        let rx = match streaming::subscribe_like_events(&pubsub_manager, &channel).await {
             Ok(rx) => rx,
             Err(e) => {
                 tracing::warn!(error = %e, channel = %channel, "Failed to subscribe via PubSubManager");
@@ -96,48 +93,27 @@ fn create_sse_stream(
         };
 
         tracing::debug!(channel = %channel, "SSE client subscribed via shared PubSub");
+        let mut events = Box::pin(streaming::create_like_event_stream(
+            rx,
+            channel.clone(),
+            heartbeat_secs,
+            shutdown_token,
+        ));
 
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs));
-
-        loop {
-            tokio::select! {
-                // Shutdown signal takes priority
-                _ = shutdown_token.cancelled() => {
-                    let ts = chrono::Utc::now().to_rfc3339();
-                    yield Ok(Event::default().data(
-                        format!(r#"{{"event":"shutdown","timestamp":"{ts}"}}"#)
-                    ));
-                    tracing::debug!(channel = %channel, "SSE stream closed by shutdown");
-                    break;
-                }
-                result = rx.recv() => {
-                    match result {
-                        Ok(payload) => {
-                            yield Ok(Event::default().data(payload));
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // Client fell behind — skip to latest, log it
-                            tracing::debug!(
-                                channel = %channel,
-                                skipped = n,
-                                "SSE client lagged, skipped messages"
-                            );
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            // Bridge task ended (Redis disconnected)
-                            let ts = chrono::Utc::now().to_rfc3339();
-                            yield Ok(Event::default().data(
-                                format!(r#"{{"event":"shutdown","timestamp":"{ts}"}}"#)
-                            ));
-                            break;
-                        }
+        while let Some(item) = futures::StreamExt::next(&mut events).await {
+            match item {
+                LikeStreamItem::Event(event) => match serde_json::to_string(&event) {
+                    Ok(payload) => yield Ok(Event::default().data(payload)),
+                    Err(error) => {
+                        tracing::warn!(error = %error, channel = %channel, "Failed to serialize LikeEvent for SSE");
                     }
+                },
+                LikeStreamItem::Lagged(skipped) => {
+                    tracing::debug!(channel = %channel, skipped, "SSE client lagged, skipped messages");
                 }
-                _ = heartbeat.tick() => {
-                    let ts = chrono::Utc::now().to_rfc3339();
-                    yield Ok(Event::default().data(
-                        format!(r#"{{"event":"heartbeat","timestamp":"{ts}"}}"#)
-                    ));
+                LikeStreamItem::Closed => {
+                    tracing::debug!(channel = %channel, "SSE stream closed because the Pub/Sub bridge ended");
+                    break;
                 }
             }
         }

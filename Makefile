@@ -24,6 +24,7 @@ TARGET_RPS      ?= 15000
 STRESS_DURATION ?= 30m
 COMPOSE         := docker compose
 COMPOSE_TEST    := docker compose -f docker-compose.yml -f docker-compose.test.yml
+COMPOSE_COVERAGE := docker compose -p social-api-coverage -f docker-compose.yml -f docker-compose.test.yml
 
 # ---------------------------------------------------------------------------
 # Help
@@ -314,62 +315,71 @@ define coverage_report
 	@tail -1 $(COVERAGE_DIR)/coverage.md
 endef
 
-coverage: ## Coverage: unit + http tests only (Docker for testcontainers; no compose needed)
+coverage: ## Coverage: unit + http/gRPC tests (starts postgres+redis and always cleans them up)
 	@mkdir -p $(COVERAGE_DIR)
-	cargo llvm-cov --workspace --all-targets \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
-	  --lcov --output-path $(COVERAGE_DIR)/lcov.info \
-	  -- --test-threads=4
+	@set -eu; \
+	  cleanup() { $(COMPOSE_COVERAGE) down -v >/dev/null 2>&1 || true; }; \
+	  trap cleanup EXIT INT TERM; \
+	  echo "── Starting shared Postgres + Redis for coverage ──"; \
+	  $(COMPOSE_COVERAGE) up -d postgres redis; \
+	  cargo llvm-cov clean --workspace; \
+	  cargo llvm-cov --workspace --all-targets \
+	    --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	    --lcov --output-path $(COVERAGE_DIR)/lcov.info \
+	    -- --test-threads=4
 	$(coverage_report)
 
-coverage-full: ## Coverage: all tests including docker-compose integration tests (runs compose up/down)
+coverage-full: ## Coverage: all tests including docker-compose integration tests (always cleans Compose)
 	@mkdir -p $(COVERAGE_DIR)
-	@echo "── Phase 1: unit + http tests (testcontainers) ──"
-	cargo llvm-cov clean --workspace
-	cargo llvm-cov test --workspace --all-targets --no-report \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
-	  -- --test-threads=4
-	@echo ""
-	@echo "── Phase 2: docker-compose integration tests (test overrides) ──"
-	$(COMPOSE_TEST) up --build -d
-	@echo "Waiting for social-api to become healthy..."
-	@for i in $$(seq 1 45); do \
-	  if curl -sf http://localhost:8080/health/live > /dev/null 2>&1; then \
-	    echo "  healthy after $${i}s"; \
-	    break; \
-	  fi; \
-	  sleep 1; \
-	  if [ $$i -eq 45 ]; then echo "  ERROR: social-api not healthy after 45s" && exit 1; fi; \
-	done
-	cargo llvm-cov test --no-report \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
-	  -p social-api --test integration_test --test graceful_shutdown_test \
-	  -- --ignored --test-threads=1 \
-	     --skip test_rate_limit_write_endpoint \
-	     --skip test_circuit_breaker_trips_on_profile_api_failure
-	@echo ""
-	@echo "── Phase 3: circuit breaker lifecycle test (stops/starts mock-services) ──"
-	@echo "Restarting social-api with test overrides (fresh circuit breaker state)..."
-	$(COMPOSE_TEST) up -d --force-recreate social-api
-	@for i in $$(seq 1 45); do \
-	  if curl -sf http://localhost:8080/health/live > /dev/null 2>&1; then \
-	    echo "  healthy after $${i}s"; \
-	    break; \
-	  fi; \
-	  sleep 1; \
-	  if [ $$i -eq 45 ]; then echo "  ERROR: social-api not healthy after 45s" && exit 1; fi; \
-	done
-	cargo llvm-cov test --no-report \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
-	  -p social-api --test integration_test \
-	  -- --ignored --test-threads=1 \
-	     test_circuit_breaker_trips_on_profile_api_failure
-	$(COMPOSE_TEST) down -v
-	@echo ""
-	@echo "── Generating combined report ──"
-	cargo llvm-cov report \
-	  --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
-	  --lcov --output-path $(COVERAGE_DIR)/lcov.info
+	@set -eu; \
+	  cleanup() { $(COMPOSE_COVERAGE) down -v >/dev/null 2>&1 || true; }; \
+	  trap cleanup EXIT INT TERM; \
+	  echo "── Phase 1: unit + http/gRPC tests (shared postgres+redis) ──"; \
+	  $(COMPOSE_COVERAGE) up -d postgres redis; \
+	  cargo llvm-cov clean --workspace; \
+	  cargo llvm-cov test --workspace --all-targets --no-report \
+	    --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	    -- --test-threads=4; \
+	  echo ""; \
+	  echo "── Phase 2: docker-compose integration tests (test overrides) ──"; \
+	  $(COMPOSE_COVERAGE) up --build -d; \
+	  echo "Waiting for social-api to become healthy..."; \
+	  for i in $$(seq 1 45); do \
+	    if curl -sf http://localhost:8080/health/live > /dev/null 2>&1; then \
+	      echo "  healthy after $${i}s"; \
+	      break; \
+	    fi; \
+	    sleep 1; \
+	    if [ $$i -eq 45 ]; then echo "  ERROR: social-api not healthy after 45s" && exit 1; fi; \
+	  done; \
+	  SOCIAL_API_TEST_COMPOSE_PROJECT=social-api-coverage cargo llvm-cov test --no-report \
+	    --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	    -p social-api --test integration_test --test graceful_shutdown_test \
+	    -- --ignored --test-threads=1 \
+	       --skip test_rate_limit_write_endpoint \
+	       --skip test_circuit_breaker_trips_on_profile_api_failure; \
+	  echo ""; \
+	  echo "── Phase 3: circuit breaker lifecycle test (stops/starts mock-services) ──"; \
+	  echo "Restarting social-api with test overrides (fresh circuit breaker state)..."; \
+	  $(COMPOSE_COVERAGE) up -d --force-recreate social-api; \
+	  for i in $$(seq 1 45); do \
+	    if curl -sf http://localhost:8080/health/live > /dev/null 2>&1; then \
+	      echo "  healthy after $${i}s"; \
+	      break; \
+	    fi; \
+	    sleep 1; \
+	    if [ $$i -eq 45 ]; then echo "  ERROR: social-api not healthy after 45s" && exit 1; fi; \
+	  done; \
+	  SOCIAL_API_TEST_COMPOSE_PROJECT=social-api-coverage cargo llvm-cov test --no-report \
+	    --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	    -p social-api --test integration_test \
+	    -- --ignored --test-threads=1 \
+	       test_circuit_breaker_trips_on_profile_api_failure; \
+	  echo ""; \
+	  echo "── Generating combined report ──"; \
+	  cargo llvm-cov report \
+	    --ignore-filename-regex '$(COVERAGE_EXCLUDE)' \
+	    --lcov --output-path $(COVERAGE_DIR)/lcov.info
 	$(coverage_report)
 
 # ---------------------------------------------------------------------------

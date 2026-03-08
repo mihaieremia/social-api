@@ -196,6 +196,31 @@ impl From<types::LikeEvent> for social_v1::LikeEvent {
     }
 }
 
+pub fn to_proto_stream_event(
+    event: types::LikeEvent,
+    content_type: &str,
+    content_id: &str,
+) -> social_v1::LikeEvent {
+    let mut proto: social_v1::LikeEvent = event.into();
+
+    if let Some(event) = &mut proto.event {
+        match event {
+            social_v1::like_event::Event::Liked(occurred) => {
+                occurred.content_type = content_type.to_string();
+                occurred.content_id = content_id.to_string();
+            }
+            social_v1::like_event::Event::Unliked(occurred) => {
+                occurred.content_type = content_type.to_string();
+                occurred.content_id = content_id.to_string();
+            }
+            social_v1::like_event::Event::Heartbeat(_)
+            | social_v1::like_event::Event::Shutdown(_) => {}
+        }
+    }
+
+    proto
+}
+
 // ── Special conversion: LikeStatusResponse -> StatusResponse ─────────
 
 /// Convert a domain `LikeStatusResponse` to a proto `StatusResponse`.

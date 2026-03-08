@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::cache::manager::CacheManager;
+use crate::cache::CacheManager;
 use crate::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::clients::profile_client::{HttpTokenValidator, TokenValidator};
 use crate::config::Config;
@@ -53,6 +53,7 @@ impl AppState {
                 &config.internal_grpc_url,
                 cache.clone(),
                 config.cache_ttl_user_status_secs,
+                Duration::from_secs(config.upstream_request_timeout_secs),
             )
             .await
             {
@@ -84,6 +85,7 @@ impl AppState {
                 &config.internal_grpc_url,
                 cache.clone(),
                 config.clone(),
+                Duration::from_secs(config.upstream_request_timeout_secs),
             )
             .await
             {
@@ -236,29 +238,38 @@ fn build_circuit_breaker(config: &Config, name: &str) -> Arc<CircuitBreaker> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn make_state() -> AppState {
-        let pg = crate::test_containers::shared_pg().await;
-        let redis = crate::test_containers::shared_redis().await;
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        state: AppState,
+    }
+
+    async fn make_state() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
 
         let mut config = Config::new_for_test();
-        config.database_url = pg.url.clone();
-        config.read_database_url = pg.url.clone();
-        config.redis_url = redis.url.clone();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
+        config.redis_url = scope.redis_url.clone();
 
         let db = DbPools::from_config(&config).await.expect("db pools");
 
-        let redis_pool = crate::cache::manager::create_pool(&config)
+        let redis_pool = crate::cache::create_pool(&config)
             .await
             .expect("redis pool");
         let cache = CacheManager::new(redis_pool);
 
         let shutdown_token = CancellationToken::new();
-        AppState::new(db, cache, config, shutdown_token).await
+        let state = AppState::new(db, cache, config, shutdown_token).await;
+        TestHarness {
+            _scope: scope,
+            state,
+        }
     }
 
     #[tokio::test]
     async fn test_new_constructs_successfully_with_real_infra() {
-        let state = make_state().await;
+        let harness = make_state().await;
+        let state = harness.state;
 
         // Test inflight counter
         assert_eq!(state.inflight_count(), 0);
@@ -291,7 +302,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_appstate_clone_shares_inflight_counter() {
-        let state = make_state().await;
+        let harness = make_state().await;
+        let state = harness.state;
 
         // Clone shares same Arc
         let state2 = state.clone();

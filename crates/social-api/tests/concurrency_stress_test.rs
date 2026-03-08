@@ -8,7 +8,8 @@
 //!   5. SSE fan-out throughput (100 subscribers)
 //!   6. Rate limiter accuracy (no bypass under concurrency)
 //!
-//! **Requires Docker** (testcontainers for Postgres + Redis).
+//! Uses shared Postgres + Redis test services. Start them once with Docker
+//! Compose before running this suite.
 //!
 //! Run all:
 //!   cargo test --test concurrency_stress_test -- --ignored --nocapture
@@ -16,13 +17,13 @@
 //! Run one:
 //!   cargo test --test concurrency_stress_test -- --ignored --nocapture test_concurrent_like_unlike_count_accuracy
 
-use social_api::cache::manager::{CacheManager, create_pool};
+use social_api::cache::CacheManager;
 use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use social_api::clients::content_client::ContentValidator;
 use social_api::config::Config;
 use social_api::db::DbPools;
 use social_api::middleware::rate_limit::check_rate_limit_inner;
-use social_api::repositories::like_repository;
+use social_api::repositories;
 use social_api::services::like_service::LikeService;
 use social_api::services::pubsub_manager::PubSubManager;
 
@@ -30,70 +31,13 @@ use shared::errors::AppError;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use testcontainers::runners::AsyncRunner;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Infrastructure (same pattern as other integration tests)
-// ---------------------------------------------------------------------------
+#[path = "common/infra.rs"]
+mod infra;
 
-struct SharedContainers {
-    _pg: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
-    _redis: testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
-    db_url: String,
-    redis_url: String,
-}
-
-static CONTAINERS: OnceCell<SharedContainers> = OnceCell::const_new();
-
-async fn shared_containers() -> &'static SharedContainers {
-    CONTAINERS
-        .get_or_init(|| async {
-            let pg = testcontainers_modules::postgres::Postgres::default()
-                .start()
-                .await
-                .expect("postgres container");
-            let pg_port = pg.get_host_port_ipv4(5432).await.unwrap();
-            let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-
-            let redis = testcontainers_modules::redis::Redis::default()
-                .start()
-                .await
-                .expect("redis container");
-            let redis_port = redis.get_host_port_ipv4(6379).await.unwrap();
-            let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-            let pool = sqlx::PgPool::connect(&db_url).await.expect("pg connect");
-            sqlx::migrate!("../../migrations")
-                .run(&pool)
-                .await
-                .expect("migrations");
-            pool.close().await;
-
-            SharedContainers {
-                _pg: pg,
-                _redis: redis,
-                db_url,
-                redis_url,
-            }
-        })
-        .await
-}
-
-async fn setup() -> (DbPools, CacheManager, String) {
-    let containers = shared_containers().await;
-
-    let mut config = Config::new_for_test();
-    config.database_url = containers.db_url.clone();
-    config.read_database_url = containers.db_url.clone();
-    config.redis_url = containers.redis_url.clone();
-
-    let db = DbPools::from_config(&config).await.unwrap();
-    let redis_pool = create_pool(&config).await.unwrap();
-    let cache = CacheManager::new(redis_pool);
-
-    (db, cache, containers.redis_url.clone())
+async fn setup() -> infra::TestContext {
+    infra::TestContext::new().await
 }
 
 fn make_like_service(db: DbPools, cache: CacheManager) -> LikeService {
@@ -135,7 +79,8 @@ impl ContentValidator for AlwaysValidContent {
 async fn test_concurrent_like_unlike_count_accuracy() {
     eprintln!("\n=== Test 1: Concurrent Like/Unlike Storm ===");
 
-    let (db, _cache, _) = setup().await;
+    let context = setup().await;
+    let db = context.db.clone();
 
     let num_content_items = 10;
     let num_tasks = 200;
@@ -161,9 +106,9 @@ async fn test_concurrent_like_unlike_count_accuracy() {
                 let cid = cids[(task_idx * ops_per_task + op) % cids.len()];
                 if op % 3 == 2 {
                     // Every 3rd op is an unlike
-                    let _ = like_repository::delete_like(&pool, user_id, "post", cid).await;
+                    let _ = repositories::delete_like(&pool, user_id, "post", cid).await;
                 } else {
-                    let _ = like_repository::insert_like(&pool, user_id, "post", cid).await;
+                    let _ = repositories::insert_like(&pool, user_id, "post", cid).await;
                 }
             }
         }));
@@ -232,7 +177,9 @@ async fn test_concurrent_like_unlike_count_accuracy() {
 async fn test_batch_counts_at_scale() {
     eprintln!("\n=== Test 2: Batch Counts at Scale ===");
 
-    let (db, cache, _) = setup().await;
+    let context = setup().await;
+    let db = context.db.clone();
+    let cache = context.cache.clone();
     let service = make_like_service(db.clone(), cache.clone());
 
     let num_items = 100;
@@ -371,7 +318,9 @@ async fn test_batch_counts_at_scale() {
 async fn test_cache_stampede_coalescing() {
     eprintln!("\n=== Test 3: Cache Stampede Simulation ===");
 
-    let (db, cache, _) = setup().await;
+    let context = setup().await;
+    let db = context.db.clone();
+    let cache = context.cache.clone();
     let service = Arc::new(make_like_service(db.clone(), cache.clone()));
 
     let content_id = Uuid::new_v4();
@@ -482,7 +431,8 @@ async fn test_cache_stampede_coalescing() {
 async fn test_cursor_pagination_no_gaps_no_duplicates() {
     eprintln!("\n=== Test 4: Cursor Pagination Depth ===");
 
-    let (db, _cache, _) = setup().await;
+    let context = setup().await;
+    let db = context.db.clone();
 
     let user_id = Uuid::new_v4();
     let total_likes = 10_000;
@@ -534,8 +484,8 @@ async fn test_cursor_pagination_no_gaps_no_duplicates() {
 
     let bg_handle = tokio::spawn(async move {
         while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = like_repository::insert_like(&writer_pool, writer_user, "post", Uuid::new_v4())
-                .await;
+            let _ =
+                repositories::insert_like(&writer_pool, writer_user, "post", Uuid::new_v4()).await;
             bg_writes_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
@@ -552,7 +502,7 @@ async fn test_cursor_pagination_no_gaps_no_duplicates() {
     let page_limit: i64 = 50;
 
     loop {
-        let rows = like_repository::get_user_likes(
+        let rows = repositories::get_user_likes(
             &db.reader,
             user_id,
             Some("post"),
@@ -628,7 +578,8 @@ async fn test_cursor_pagination_no_gaps_no_duplicates() {
 async fn test_sse_fanout_throughput() {
     eprintln!("\n=== Test 5: SSE Fan-Out Throughput ===");
 
-    let (_, _, redis_url) = setup().await;
+    let context = setup().await;
+    let redis_url = context.config.redis_url.clone();
 
     let channel = "sse:post:fanout-stress-test";
     let num_subscribers = 100;
@@ -743,7 +694,8 @@ async fn test_sse_fanout_throughput() {
 async fn test_rate_limiter_accuracy_under_concurrency() {
     eprintln!("\n=== Test 6: Rate Limiter Accuracy ===");
 
-    let (_, cache, _) = setup().await;
+    let context = setup().await;
+    let cache = context.cache.clone();
 
     let limit: u64 = 30;
     let num_concurrent = 100;

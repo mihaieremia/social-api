@@ -17,7 +17,6 @@ shared = { workspace = true }
 
 # Web framework
 axum = { workspace = true }
-axum-extra = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 
@@ -53,17 +52,14 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 dashmap = { workspace = true }
 # gRPC
 tonic = { workspace = true }
-tonic-health = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 
 async-trait = "0.1"
 async-stream = "0.3"
-tokio-stream = "0.1"
 futures = "0.3"
 
 # OpenAPI
@@ -81,3 +77,4 @@ serial_test = { workspace = true }
 # sqlx re-declared to satisfy Cargo; no extra features needed beyond what [dependencies] already enables
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
 http-body-util = "0.1"
+tokio-stream = "0.1"
