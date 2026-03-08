@@ -116,6 +116,10 @@ function randomBatchItems(n) {
   return items;
 }
 
+// Tell k6 that 429 (rate limited) is an expected status — don't count it as
+// a failure in the built-in http_req_failed metric.
+http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }, 429));
+
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 function authHeaders(token) {

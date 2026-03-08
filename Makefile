@@ -123,6 +123,7 @@ test-all: test-unit test-integration ## Run all tests (unit + integration)
 # ---------------------------------------------------------------------------
 # K6 — Unified load testing (HTTP + gRPC + SSE, all endpoints)
 # ---------------------------------------------------------------------------
+# Prerequisite: `make up-stress` (disables rate limits, oversized pools)
 # All targets use k6/test.js with K6_SCENARIO to select the mode.
 # Each mode tests ALL transports (HTTP, gRPC, SSE) and ALL endpoints
 # (count, status, user_likes, leaderboard, batch_counts, batch_statuses, like/unlike).
