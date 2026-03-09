@@ -60,22 +60,18 @@ make coverage-full      # Full coverage including docker-compose integration
 
 Requires [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) (`brew install k6`).
 
+Run `make up-stress` first (disables rate limits, oversized pools).
+
 ```bash
-make k6-load            # Full sequential suite (~11 min)
-make k6-load-read       # Read path only (10k rps)
-make k6-load-batch      # Batch counts only (1k rps)
-make k6-load-batch-status   # Auth batch statuses only (500 rps)
-make k6-load-batch-hotspot  # Identical 100-item batch counts
-make k6-load-batch-duplicate # Duplicate-heavy 100-item batch counts
-make k6-load-write      # Write path only (500 rps)
-make k6-load-mixed      # Mixed 80/15/5 workload (2k rps)
-make k6-stress          # Ramp to TARGET_RPS, sustained
-make k6-stress-batch-hotspot # Stress the hot-spot batch-count path
-make k6-stress-batch-status  # Stress the auth batch-status path
-make k6-breakpoint      # Ramp until system breaks
+make k6-smoke           # Quick 60s smoke test — all transports, all endpoints, low RPS
+make k6-load            # Standard 5min load — HTTP+gRPC+SSE parallel, moderate RPS
+make k6-stress          # Sustained high-RPS ramp — all transports, STRESS_DURATION hold
+make k6-seed            # Seed DB with massive data (NUM_USERS × NUM_CONTENT likes)
+make k6-comprehensive   # Full suite: seed → stress all endpoints + race conditions
+make k6-tune-macos      # Tune macOS TCP/socket limits for high-RPS tests (requires sudo)
 ```
 
-Override defaults: `make k6-stress TARGET_RPS=50000 STRESS_DURATION=30m`
+Override defaults: `make k6-stress STRESS_DURATION=30m NUM_USERS=100 NUM_CONTENT=60`
 
 See [k6/README.md](k6/README.md) for thresholds and baseline results.
 
