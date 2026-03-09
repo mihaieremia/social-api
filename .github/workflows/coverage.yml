@@ -1,6 +1,8 @@
 # Coverage report — runs on main pushes and PRs
 # Uses cargo-llvm-cov with testcontainers (unit + HTTP tests only).
-# Integration tests require docker compose and run separately in coverage-full.
+#
+# Push to main  → markdown summary in job UI + artifact upload
+# Pull request  → same summary + sticky PR comment with per-file Δ vs main
 
 name: Coverage
 
@@ -12,6 +14,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  IGNORE_REGEX: 'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs'
 
 concurrency:
   group: coverage-${{ github.ref }}
@@ -21,6 +24,10 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
     services:
       postgres:
         image: postgres:16
@@ -44,29 +51,233 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Generate coverage
+
+      # ── Run tests and collect coverage ──────────────────────────────────────
+      - name: Generate coverage (lcov)
         run: |
           cargo llvm-cov --workspace --all-targets \
-            --ignore-filename-regex 'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs' \
+            --ignore-filename-regex "$IGNORE_REGEX" \
             --lcov --output-path lcov.info \
             -- --test-threads=4
+
+      # Generate JSON from the profdata produced above (no re-run)
+      - name: Export coverage JSON
+        run: |
+          cargo llvm-cov report \
+            --ignore-filename-regex "$IGNORE_REGEX" \
+            --json > coverage.json
+
+      # ── Download base coverage for diff (PRs only) ───────────────────────────
+      - name: Download base coverage artifact
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: coverage.yml
+          branch: ${{ github.base_ref }}
+          name: coverage-data
+          path: base-coverage/
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      # ── Build markdown report + write to step summary ───────────────────────
+      - name: Generate markdown report
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, re
+
+          IGNORE = re.compile(r'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs')
+
+          def load_coverage(path):
+              with open(path) as f:
+                  data = json.load(f)
+              files = {}
+              totals = None
+              for chunk in data.get('data', []):
+                  if totals is None:
+                      totals = chunk.get('totals', {})
+                  for entry in chunk.get('files', []):
+                      name = entry['filename']
+                      if IGNORE.search(name):
+                          continue
+                      lines = entry['summary']['lines']
+                      files[name] = {
+                          'covered': lines['covered'],
+                          'count':   lines['count'],
+                          'pct':     lines['percent'],
+                      }
+              return files, totals
+
+          def short(path):
+              parts = path.split('/')
+              for anchor in ('src', 'crates'):
+                  if anchor in parts:
+                      idx = parts.index(anchor)
+                      return '/'.join(parts[idx:])
+              return '/'.join(parts[-2:])
+
+          def badge(pct):
+              if pct >= 80: return '🟢'
+              if pct >= 60: return '🟡'
+              return '🔴'
+
+          def delta_fmt(d):
+              if   d >  0.05: return f'🟢 ▲ +{d:.1f}%'
+              elif d < -0.05: return f'🔴 ▼ {d:.1f}%'
+              return '⚪ ±0%'
+
+          is_pr    = os.environ.get('IS_PR', 'false') == 'true'
+          base_ref = os.environ.get('BASE_REF', 'main')
+
+          cur_files, cur_totals = load_coverage('coverage.json')
+
+          base_files = {}
+          base_path  = 'base-coverage/coverage.json'
+          have_base  = os.path.exists(base_path)
+          if have_base:
+              base_files, _ = load_coverage(base_path)
+
+          lt            = cur_totals['lines']
+          total_pct     = lt['percent']
+          total_covered = lt['covered']
+          total_count   = lt['count']
+
+          ft     = cur_totals.get('functions', {})
+          fn_pct = ft.get('percent', 0)
+
+          bt     = cur_totals.get('branches', {})
+          br_pct = bt.get('percent', 0)
+
+          md = ['## 📊 Coverage Report', '']
+
+          if have_base and is_pr:
+              base_cov  = sum(v['covered'] for v in base_files.values())
+              base_tot  = sum(v['count']   for v in base_files.values())
+              base_pct  = (base_cov / base_tot * 100) if base_tot else 0
+              d         = total_pct - base_pct
+              md.append(
+                  f'{badge(total_pct)} **Lines: {total_pct:.1f}%** '
+                  f'({total_covered}/{total_count})   '
+                  f'{delta_fmt(d)} vs `{base_ref}`'
+              )
+          else:
+              md.append(
+                  f'{badge(total_pct)} **Lines: {total_pct:.1f}%** '
+                  f'({total_covered}/{total_count})'
+              )
+
+          md.append('')
+          md.append('| Metric | Coverage |')
+          md.append('|--------|----------|')
+          md.append(f'| Lines     | {badge(total_pct)} {total_pct:.1f}% |')
+          md.append(f'| Functions | {badge(fn_pct)} {fn_pct:.1f}% |')
+          md.append(f'| Branches  | {badge(br_pct)} {br_pct:.1f}% |')
+          md.append('')
+
+          # Changed-files section — PRs with base data only
+          if is_pr and have_base:
+              changed   = []
+              new_files = []
+
+              for fname, info in sorted(cur_files.items()):
+                  sname = short(fname)
+                  pct   = info['pct']
+                  if fname in base_files:
+                      diff = pct - base_files[fname]['pct']
+                      if abs(diff) > 0.05:
+                          changed.append((diff, sname, base_files[fname]['pct'], pct))
+                  else:
+                      new_files.append((sname, pct))
+
+              if changed or new_files:
+                  md.append('<details>')
+                  md.append(f'<summary><b>Changed files ({len(changed) + len(new_files)})</b></summary>')
+                  md.append('')
+                  md.append('| File | Before | After | Δ |')
+                  md.append('|------|--------|-------|---|')
+                  # Regressions first (lowest delta), then improvements
+                  for diff, sname, before, after in sorted(changed, key=lambda x: x[0]):
+                      md.append(
+                          f'| `{sname}` '
+                          f'| {badge(before)} {before:.1f}% '
+                          f'| {badge(after)} {after:.1f}% '
+                          f'| {delta_fmt(diff)} |'
+                      )
+                  for sname, pct in sorted(new_files):
+                      md.append(
+                          f'| `{sname}` | — '
+                          f'| {badge(pct)} {pct:.1f}% '
+                          f'| 🆕 new file |'
+                      )
+                  md.append('')
+                  md.append('</details>')
+                  md.append('')
+
+          # Full file table (always)
+          md.append('<details>')
+          md.append(f'<summary><b>All files ({len(cur_files)})</b></summary>')
+          md.append('')
+          md.append('| File | Lines | Coverage |')
+          md.append('|------|-------|----------|')
+          for fname, info in sorted(cur_files.items(), key=lambda x: -x[1]['pct']):
+              md.append(
+                  f'| `{short(fname)}` '
+                  f'| {info["covered"]}/{info["count"]} '
+                  f'| {badge(info["pct"])} {info["pct"]:.1f}% |'
+              )
+          md.append('')
+          md.append('</details>')
+
+          report = '\n'.join(md)
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(report + '\n')
+
+          with open('coverage-report.md', 'w') as f:
+              f.write(report + '\n')
+
+          print(report)
+          PYEOF
+
+      # ── Sticky PR comment ─────────────────────────────────────────────────────
+      - name: Post coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage-report
+          path: coverage-report.md
+
+      # ── Persist artifact for future PR diffs ──────────────────────────────────
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data
+          path: |
+            lcov.info
+            coverage.json
+          retention-days: 30
+
+      # ── Codecov (main branch only) ────────────────────────────────────────────
       - name: Upload to Codecov
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: codecov/codecov-action@v5
         with:
           files: lcov.info
           fail_ci_if_error: false
-      - name: Coverage summary
-        run: |
-          cargo llvm-cov report --summary-only \
-            --ignore-filename-regex 'crates/mock-services|src/main\.rs|src/logging\.rs|src/openapi\.rs'
