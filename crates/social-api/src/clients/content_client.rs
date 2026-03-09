@@ -213,21 +213,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_content_type_returns_error() {
-        // Config::new_for_test() has "post", "bonus_hunter", "top_picks" — NOT "unknown_type"
-        let config = crate::config::Config::new_for_test();
-
-        // Build a fake (unreachable) CacheManager — the error is thrown before any
-        // cache or HTTP access, so Redis connectivity doesn't matter here.
-        let manager = bb8_redis::RedisConnectionManager::new("redis://127.0.0.1:19995").unwrap();
-        let pool = bb8::Pool::builder()
-            .max_size(1)
-            .connection_timeout(std::time::Duration::from_millis(50))
-            .build(manager)
-            .await
-            .unwrap();
-        let cache = crate::cache::CacheManager::new(pool, &config);
-
-        let validator = HttpContentValidator::new(reqwest::Client::new(), cache, config);
+        let (_scope, cache) = make_cache().await;
+        let http_client = reqwest::Client::new();
+        let config = crate::config::Config::new_for_test(); // no "unknown_type" URL in config
+        let validator = HttpContentValidator::new(http_client, cache, config);
         let content_id = Uuid::new_v4();
 
         let result = validator.validate("unknown_type", content_id).await;
