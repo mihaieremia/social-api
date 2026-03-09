@@ -127,3 +127,245 @@ impl TokenValidator for GrpcTokenValidator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::create_pool;
+    use crate::clients::profile_client::TokenValidator;
+    use crate::config::Config;
+    use crate::proto::internal_v1::{
+        ValidateTokenRequest, ValidateTokenResponse,
+        profile_service_server::{ProfileService, ProfileServiceServer},
+    };
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request, Response, Status};
+
+    // ── Mock service implementations ──────────────────────────────────────
+
+    #[derive(Clone)]
+    struct ValidProfile {
+        user_id: String,
+        display_name: String,
+    }
+
+    #[tonic::async_trait]
+    impl ProfileService for ValidProfile {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            Ok(Response::new(ValidateTokenResponse {
+                valid: true,
+                user_id: self.user_id.clone(),
+                display_name: self.display_name.clone(),
+            }))
+        }
+    }
+
+    #[derive(Clone)]
+    struct InvalidProfile;
+
+    #[tonic::async_trait]
+    impl ProfileService for InvalidProfile {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            Ok(Response::new(ValidateTokenResponse {
+                valid: false,
+                user_id: String::new(),
+                display_name: String::new(),
+            }))
+        }
+    }
+
+    #[derive(Clone)]
+    struct ErrProfile {
+        code: tonic::Code,
+    }
+
+    #[tonic::async_trait]
+    impl ProfileService for ErrProfile {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            Err(Status::new(self.code, "mock error"))
+        }
+    }
+
+    #[derive(Clone)]
+    struct SlowProfile;
+
+    #[tonic::async_trait]
+    impl ProfileService for SlowProfile {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Err(Status::cancelled("too slow"))
+        }
+    }
+
+    #[derive(Clone)]
+    struct BadUuidProfile;
+
+    #[tonic::async_trait]
+    impl ProfileService for BadUuidProfile {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            Ok(Response::new(ValidateTokenResponse {
+                valid: true,
+                user_id: "not-a-uuid".to_string(),
+                display_name: "User".to_string(),
+            }))
+        }
+    }
+
+    async fn spawn_profile<S: ProfileService>(svc: S) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ProfileServiceServer::new(svc))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        format!("http://127.0.0.1:{port}")
+    }
+
+    struct Harness {
+        _scope: crate::test_containers::TestScope,
+        cache: CacheManager,
+    }
+
+    async fn make_harness() -> Harness {
+        let scope = crate::test_containers::isolated_scope().await;
+        let mut config = Config::new_for_test();
+        config.redis_url = scope.redis_url.clone();
+        let pool = create_pool(&config).await.unwrap();
+        let cache = CacheManager::new(pool, &config);
+        Harness {
+            _scope: scope,
+            cache,
+        }
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_cache_key_has_tok_prefix() {
+        let key = GrpcTokenValidator::token_cache_key("Bearer abc123");
+        assert!(key.starts_with("tok:"));
+    }
+
+    #[tokio::test]
+    async fn validate_returns_user_for_valid_token() {
+        let h = make_harness().await;
+        let user_id = Uuid::new_v4();
+        let endpoint = spawn_profile(ValidProfile {
+            user_id: user_id.to_string(),
+            display_name: "Alice".to_string(),
+        })
+        .await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let user = v.validate("tok_valid").await.unwrap();
+        assert_eq!(user.user_id, user_id);
+        assert_eq!(user.display_name, "Alice");
+    }
+
+    #[tokio::test]
+    async fn validate_returns_cached_user_on_cache_hit() {
+        let h = make_harness().await;
+        let user_id = Uuid::new_v4();
+        let key = GrpcTokenValidator::token_cache_key("tok_cached");
+        let user = AuthenticatedUser {
+            user_id,
+            display_name: "Cached".to_string(),
+        };
+        h.cache
+            .set(&key, &serde_json::to_string(&user).unwrap(), 300)
+            .await;
+
+        // Server would fail — proves cache is consulted first
+        let endpoint = spawn_profile(ErrProfile {
+            code: tonic::Code::Internal,
+        })
+        .await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let result = v.validate("tok_cached").await.unwrap();
+        assert_eq!(result.user_id, user_id);
+    }
+
+    #[tokio::test]
+    async fn validate_returns_unauthorized_when_valid_false() {
+        let h = make_harness().await;
+        let endpoint = spawn_profile(InvalidProfile).await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let err = v.validate("tok_invalid").await.unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_returns_unauthorized_for_unauthenticated_status() {
+        let h = make_harness().await;
+        let endpoint = spawn_profile(ErrProfile {
+            code: tonic::Code::Unauthenticated,
+        })
+        .await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let err = v.validate("tok_unauth").await.unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_returns_dependency_unavailable_for_other_grpc_error() {
+        let h = make_harness().await;
+        let endpoint = spawn_profile(ErrProfile {
+            code: tonic::Code::Internal,
+        })
+        .await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let err = v.validate("tok_grpc_err").await.unwrap_err();
+        assert!(matches!(err, AppError::DependencyUnavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_returns_dependency_unavailable_on_timeout() {
+        let h = make_harness().await;
+        let endpoint = spawn_profile(SlowProfile).await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_millis(50))
+            .await
+            .unwrap();
+        let err = v.validate("tok_timeout").await.unwrap_err();
+        assert!(matches!(err, AppError::DependencyUnavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_returns_error_for_invalid_uuid_in_response() {
+        let h = make_harness().await;
+        let endpoint = spawn_profile(BadUuidProfile).await;
+        let v = GrpcTokenValidator::new(&endpoint, h.cache, 300, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let result = v.validate("tok_bad_uuid").await;
+        assert!(result.is_err());
+    }
+}

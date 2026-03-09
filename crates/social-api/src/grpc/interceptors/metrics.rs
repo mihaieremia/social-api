@@ -75,4 +75,30 @@ mod tests {
         );
         assert_eq!(grpc_code_label(Code::Unavailable), "UNAVAILABLE");
     }
+
+    #[test]
+    fn grpc_code_label_covers_all_tonic_codes() {
+        let cases = [
+            (Code::Ok, "OK"),
+            (Code::Cancelled, "CANCELLED"),
+            (Code::Unknown, "UNKNOWN"),
+            (Code::InvalidArgument, "INVALID_ARGUMENT"),
+            (Code::DeadlineExceeded, "DEADLINE_EXCEEDED"),
+            (Code::NotFound, "NOT_FOUND"),
+            (Code::AlreadyExists, "ALREADY_EXISTS"),
+            (Code::PermissionDenied, "PERMISSION_DENIED"),
+            (Code::ResourceExhausted, "RESOURCE_EXHAUSTED"),
+            (Code::FailedPrecondition, "FAILED_PRECONDITION"),
+            (Code::Aborted, "ABORTED"),
+            (Code::OutOfRange, "OUT_OF_RANGE"),
+            (Code::Unimplemented, "UNIMPLEMENTED"),
+            (Code::Internal, "INTERNAL"),
+            (Code::Unavailable, "UNAVAILABLE"),
+            (Code::DataLoss, "DATA_LOSS"),
+            (Code::Unauthenticated, "UNAUTHENTICATED"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(grpc_code_label(code), expected, "failed for {code:?}");
+        }
+    }
 }
