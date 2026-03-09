@@ -139,6 +139,56 @@ pub fn init_metrics() -> metrics_exporter_prometheus::PrometheusHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        middleware as axum_middleware,
+        routing::get,
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_track_metrics_records_200() {
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::OK }))
+            .layer(axum_middleware::from_fn(track_metrics));
+
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_track_metrics_records_404() {
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum_middleware::from_fn(track_metrics));
+
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_track_metrics_records_unknown_status() {
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::IM_A_TEAPOT }))
+            .layer(axum_middleware::from_fn(track_metrics));
+
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+    }
 
     #[test]
     fn test_normalize_path_uuid() {
