@@ -263,3 +263,126 @@ pub(crate) fn map_db_error(error: sqlx::Error) -> AppError {
 fn count_cache_key(content_type: &str, content_id: Uuid) -> String {
     format!("lc:{content_type}:{content_id}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::CacheManager;
+    use crate::config::Config;
+    use crate::db::DbPools;
+    use crate::test_containers::isolated_scope;
+    use shared::errors::ErrorCode;
+
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        cache_svc: LikeCountCache,
+        db: DbPools,
+    }
+
+    async fn make_harness() -> TestHarness {
+        let scope = isolated_scope().await;
+
+        let mut config = Config::new_for_test();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
+        config.redis_url = scope.redis_url.clone();
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        let redis_pool = crate::cache::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = CacheManager::new(redis_pool, &config);
+        let cache_svc = LikeCountCache::new(db.clone(), cache, config);
+
+        TestHarness {
+            _scope: scope,
+            cache_svc,
+            db,
+        }
+    }
+
+    #[test]
+    fn test_count_cache_key_format() {
+        let uuid = Uuid::new_v4();
+        let key = count_cache_key("article", uuid);
+        assert_eq!(key, format!("lc:article:{uuid}"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_too_large_returns_error() {
+        let harness = make_harness().await;
+
+        let items: Vec<(String, Uuid)> = (0..101)
+            .map(|_| ("article".to_string(), Uuid::new_v4()))
+            .collect();
+
+        let result = harness.cache_svc.batch_counts(&items).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::BatchTooLarge);
+
+        match err {
+            AppError::BatchTooLarge { size, max } => {
+                assert_eq!(size, 101);
+                assert_eq!(max, 100);
+            }
+            other => panic!("Expected BatchTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_count_and_get_count_value() {
+        let harness = make_harness().await;
+        let uuid = Uuid::new_v4();
+
+        // Insert a row into like_counts so the DB has the record
+        sqlx::query(
+            "INSERT INTO like_counts (content_type, content_id, total_count) VALUES ($1, $2, $3)",
+        )
+        .bind("article")
+        .bind(uuid)
+        .bind(42_i64)
+        .execute(&harness.db.writer)
+        .await
+        .expect("insert like_counts row");
+
+        // Prime the cache via write_count
+        harness.cache_svc.write_count("article", uuid, 42).await;
+
+        // get_count_value should return the cached value
+        let count = harness
+            .cache_svc
+            .get_count_value("article", uuid)
+            .await
+            .expect("get_count_value should succeed");
+
+        assert_eq!(count, 42);
+    }
+
+    #[tokio::test]
+    async fn test_get_count_value_cold_cache() {
+        let harness = make_harness().await;
+        let uuid = Uuid::new_v4();
+
+        // Insert a row directly without warming the cache
+        sqlx::query(
+            "INSERT INTO like_counts (content_type, content_id, total_count) VALUES ($1, $2, $3)",
+        )
+        .bind("article")
+        .bind(uuid)
+        .bind(7_i64)
+        .execute(&harness.db.writer)
+        .await
+        .expect("insert like_counts row");
+
+        // get_count_value should fall through to DB on cache miss
+        let count = harness
+            .cache_svc
+            .get_count_value("article", uuid)
+            .await
+            .expect("get_count_value should succeed on cold cache");
+
+        assert_eq!(count, 7);
+    }
+}
