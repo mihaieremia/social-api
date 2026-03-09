@@ -69,3 +69,28 @@ fn pool_options(config: &Config, role: &'static str) -> PgPoolOptions {
             })
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::test_containers::isolated_scope;
+
+    #[tokio::test]
+    async fn test_db_pools_from_config_connects_and_is_healthy() {
+        let scope = isolated_scope().await;
+
+        let mut config = Config::new_for_test();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
+
+        let pools = DbPools::from_config(&config)
+            .await
+            .expect("from_config should succeed");
+        pools
+            .run_migrations()
+            .await
+            .expect("run_migrations should succeed");
+        assert!(pools.is_healthy().await, "is_healthy should return true");
+    }
+}
