@@ -308,6 +308,13 @@ mod tests {
         assert_eq!(key, format!("lc:article:{uuid}"));
     }
 
+    #[test]
+    fn test_map_db_error_wraps_sqlx_error() {
+        let sqlx_err = sqlx::Error::RowNotFound;
+        let app_err = map_db_error(sqlx_err);
+        assert!(matches!(app_err, AppError::Database(_)));
+    }
+
     #[tokio::test]
     async fn test_batch_too_large_returns_error() {
         let harness = make_harness().await;
