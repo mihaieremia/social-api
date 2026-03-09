@@ -63,4 +63,49 @@ mod tests {
         let key = format!("{prefix}:{}", fnv1a_hash("192.168.1.1"));
         assert!(key.starts_with("rl:ip:read:"));
     }
+
+    // ── Redis integration tests ────────────────────────────────────────────
+
+    struct TestHarness {
+        _scope: crate::test_containers::TestScope,
+        cache: CacheManager,
+    }
+
+    async fn make_cache() -> TestHarness {
+        let scope = crate::test_containers::isolated_scope().await;
+        let mut config = crate::config::Config::new_for_test();
+        config.redis_url = scope.redis_url.clone();
+        let pool = crate::cache::create_pool(&config).await.unwrap();
+        let cache = CacheManager::new(pool, &config);
+        TestHarness {
+            _scope: scope,
+            cache,
+        }
+    }
+
+    #[tokio::test]
+    async fn allows_request_under_write_limit() {
+        let h = make_cache().await;
+        let result = check_grpc_rate_limit(&h.cache, "grpc_user_ok", true, 10, 100).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn blocks_request_over_write_limit_with_resource_exhausted() {
+        let h = make_cache().await;
+        // exhaust a limit of 2
+        for _ in 0..2 {
+            let _ = check_grpc_rate_limit(&h.cache, "grpc_spammer", true, 2, 100).await;
+        }
+        let result = check_grpc_rate_limit(&h.cache, "grpc_spammer", true, 2, 100).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn allows_request_under_read_limit() {
+        let h = make_cache().await;
+        let result = check_grpc_rate_limit(&h.cache, "192.168.99.1", false, 10, 1000).await;
+        assert!(result.is_ok());
+    }
 }

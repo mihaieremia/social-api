@@ -239,4 +239,45 @@ mod tests {
         let path = "/v1/likes/stream/post/731b0395-4888-4822-b516-05b4b7bf2089";
         assert_eq!(normalize_path(path), "/v1/likes/stream/post/:id");
     }
+
+    #[tokio::test]
+    async fn test_track_metrics_records_3xx() {
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::MOVED_PERMANENTLY }))
+            .layer(axum_middleware::from_fn(track_metrics));
+
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
+    #[tokio::test]
+    async fn test_track_metrics_records_5xx() {
+        let app = Router::new()
+            .route("/test", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .layer(axum_middleware::from_fn(track_metrics));
+
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_looks_like_uuid_false_for_36_char_non_uuid() {
+        // 36 chars but hyphens not at UUID positions → should be false
+        let s = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // 36 x's, no hyphens
+        assert!(!looks_like_uuid(s));
+    }
+
+    #[test]
+    fn test_looks_like_number_false_for_alphanumeric() {
+        assert!(!looks_like_number("abc123"));
+        assert!(!looks_like_number(""));
+    }
 }

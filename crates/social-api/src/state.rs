@@ -238,6 +238,64 @@ fn build_circuit_breaker(config: &Config, name: &str) -> Arc<CircuitBreaker> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::internal_v1::{
+        ValidateContentRequest, ValidateContentResponse, ValidateTokenRequest,
+        ValidateTokenResponse,
+        content_service_server::{ContentService, ContentServiceServer},
+        profile_service_server::{ProfileService, ProfileServiceServer},
+    };
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request, Response, Status};
+
+    // ── Minimal mock services for gRPC transport path ─────────────────────
+
+    #[derive(Clone)]
+    struct OkContentMock;
+
+    #[tonic::async_trait]
+    impl ContentService for OkContentMock {
+        async fn validate(
+            &self,
+            _: Request<ValidateContentRequest>,
+        ) -> Result<Response<ValidateContentResponse>, Status> {
+            Ok(Response::new(ValidateContentResponse { exists: true }))
+        }
+    }
+
+    #[derive(Clone)]
+    struct OkProfileMock;
+
+    #[tonic::async_trait]
+    impl ProfileService for OkProfileMock {
+        async fn validate_token(
+            &self,
+            _: Request<ValidateTokenRequest>,
+        ) -> Result<Response<ValidateTokenResponse>, Status> {
+            Ok(Response::new(ValidateTokenResponse {
+                valid: true,
+                user_id: uuid::Uuid::new_v4().to_string(),
+                display_name: "mock".to_string(),
+            }))
+        }
+    }
+
+    /// Spawn a single tonic server that routes both Content and Profile services.
+    async fn spawn_dual_grpc_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ContentServiceServer::new(OkContentMock))
+                .add_service(ProfileServiceServer::new(OkProfileMock))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        format!("http://127.0.0.1:{port}")
+    }
+
     struct TestHarness {
         _scope: crate::test_containers::TestScope,
         state: AppState,
@@ -338,5 +396,30 @@ mod tests {
         assert_eq!(state.inflight_count(), 1);
         state.inflight_decrement();
         assert_eq!(state.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn new_with_grpc_transport_connects_successfully() {
+        let grpc_endpoint = spawn_dual_grpc_server().await;
+
+        let scope = crate::test_containers::isolated_scope().await;
+        let mut config = Config::new_for_test();
+        config.database_url = scope.database_url.clone();
+        config.read_database_url = scope.database_url.clone();
+        config.redis_url = scope.redis_url.clone();
+        config.internal_transport = "grpc".to_string();
+        config.internal_grpc_url = grpc_endpoint;
+
+        let db = DbPools::from_config(&config).await.expect("db pools");
+        let redis_pool = crate::cache::create_pool(&config)
+            .await
+            .expect("redis pool");
+        let cache = CacheManager::new(redis_pool, &config);
+        let shutdown_token = CancellationToken::new();
+
+        // This exercises the gRPC transport Ok(...) paths in AppState::new()
+        let state = AppState::new(db, cache, config, shutdown_token).await;
+        let _ = state.token_validator();
+        let _ = state.like_service();
     }
 }

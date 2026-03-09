@@ -40,3 +40,25 @@ impl From<AppError> for ApiErrorResponse {
         Self(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn into_response_returns_500_for_database_error() {
+        // Exercises the `if status == INTERNAL_SERVER_ERROR` logging branch.
+        let err = AppError::Database("connection lost".to_string());
+        let response = ApiErrorResponse(err).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn from_app_error_wraps_and_returns_401() {
+        let err = AppError::Unauthorized("bad token".to_string());
+        let response = ApiErrorResponse::from(err).into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
