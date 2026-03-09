@@ -10,6 +10,12 @@ use crate::config::Config;
 use crate::db::DbPools;
 use crate::repositories;
 
+/// Like count cache with stampede coalescing.
+///
+/// On cache miss, uses a leader/follower pattern via `DashMap<String, watch::Sender>`:
+/// the first task (leader) queries the DB and broadcasts the result; concurrent tasks
+/// (followers) subscribe to the same `watch::channel` and receive it instantly.
+/// If the leader fails or times out, followers fall back to their own DB query.
 pub(crate) struct LikeCountCache {
     db: DbPools,
     cache: CacheManager,
@@ -27,6 +33,8 @@ impl LikeCountCache {
         }
     }
 
+    /// Get the like count for a content item. Checks L1 → Redis → DB.
+    /// Uses leader/follower coalescing to prevent thundering herd on cache miss.
     pub(crate) async fn get_count_value(
         &self,
         content_type: &str,
@@ -86,6 +94,8 @@ impl LikeCountCache {
         }
     }
 
+    /// Batch get counts for up to 100 items. Uses MGET for cache hits,
+    /// then coalesces DB fetches for misses using the same leader/follower pattern.
     pub(crate) async fn batch_counts(
         &self,
         items: &[(String, Uuid)],
@@ -223,6 +233,7 @@ impl LikeCountCache {
         Ok(results)
     }
 
+    /// Write-through: update the count in both L1 and Redis after a mutation.
     pub(crate) async fn write_count(&self, content_type: &str, content_id: Uuid, count: i64) {
         let cache_key = count_cache_key(content_type, content_id);
         self.cache

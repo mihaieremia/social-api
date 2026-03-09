@@ -4,6 +4,11 @@ use shared::types::AuthenticatedUser;
 use crate::clients::circuit_breaker::CircuitBreaker;
 use crate::clients::profile_client::TokenValidator;
 
+/// Reasons authentication can fail, mapped to `AppError` by extractors/interceptors.
+///
+/// - `MissingToken` / `MalformedToken` → `AppError::Unauthorized`
+/// - `InvalidToken` → `AppError::Unauthorized` (valid format, rejected by Profile API)
+/// - `ServiceUnavailable` → `AppError::DependencyUnavailable` (circuit breaker open or Profile API down)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthFailure {
     MissingToken,
@@ -12,6 +17,7 @@ pub enum AuthFailure {
     ServiceUnavailable,
 }
 
+/// Extract the token from a `Bearer <token>` Authorization header value.
 pub fn parse_bearer_token(header: &str) -> Result<&str, AuthFailure> {
     let token = header
         .strip_prefix("Bearer ")
@@ -24,6 +30,10 @@ pub fn parse_bearer_token(header: &str) -> Result<&str, AuthFailure> {
     Ok(token)
 }
 
+/// Validate a token via the Profile API, gated by the circuit breaker.
+///
+/// On success/auth-rejection: records a breaker success (Profile API is healthy).
+/// On transport/server error: records a breaker failure (may trip the circuit).
 pub async fn authenticate_token(
     token: &str,
     validator: &dyn TokenValidator,

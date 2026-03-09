@@ -7,12 +7,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::services::pubsub_manager::PubSubManager;
 
+/// Items yielded by the SSE / gRPC like event stream.
+///
+/// - `Event`: a deserialized `LikeEvent` (like, unlike, heartbeat, shutdown).
+/// - `Lagged(n)`: the receiver fell behind and `n` messages were skipped.
+/// - `Closed`: the broadcast channel was dropped (bridge reconnecting or shutdown).
 pub enum LikeStreamItem {
     Event(LikeEvent),
     Lagged(u64),
     Closed,
 }
 
+/// Subscribe to the Redis Pub/Sub channel for a content item's like events.
 pub async fn subscribe_like_events(
     pubsub_manager: &PubSubManager,
     channel: &str,
@@ -20,6 +26,9 @@ pub async fn subscribe_like_events(
     pubsub_manager.subscribe(channel).await
 }
 
+/// Create an async stream that merges like events, periodic heartbeats, and
+/// graceful shutdown into a single `LikeStreamItem` sequence.
+/// Used by both the SSE handler and the gRPC streaming RPC.
 pub fn create_like_event_stream(
     mut rx: broadcast::Receiver<String>,
     channel: String,

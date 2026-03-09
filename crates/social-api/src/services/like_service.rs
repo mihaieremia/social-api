@@ -27,6 +27,7 @@ pub struct LikeService {
 }
 
 impl LikeService {
+    /// Create a new `LikeService` with the default HTTP content validator.
     pub fn new(
         db: DbPools,
         cache: CacheManager,
@@ -42,6 +43,7 @@ impl LikeService {
         Self::new_with_validator(db, cache, content_validator, config, content_breaker)
     }
 
+    /// Create a new `LikeService` with a custom content validator (for testing).
     pub fn new_with_validator(
         db: DbPools,
         cache: CacheManager,
@@ -70,6 +72,8 @@ impl LikeService {
         Self { commands, queries }
     }
 
+    /// Like content. Validates content via circuit-breaker-gated Content API,
+    /// inserts the like (idempotent), updates cache, and publishes an SSE event.
     pub async fn like(
         &self,
         user_id: Uuid,
@@ -79,6 +83,8 @@ impl LikeService {
         self.commands.like(user_id, content_type, content_id).await
     }
 
+    /// Unlike content. Validates content, removes the like (idempotent),
+    /// updates cache, and publishes an SSE event if the like existed.
     pub async fn unlike(
         &self,
         user_id: Uuid,
@@ -90,6 +96,8 @@ impl LikeService {
             .await
     }
 
+    /// Get the like count for a content item. Served from L1 → Redis → DB
+    /// with stampede coalescing on cache miss.
     pub async fn get_count(
         &self,
         content_type: &str,
@@ -98,6 +106,8 @@ impl LikeService {
         self.queries.get_count(content_type, content_id).await
     }
 
+    /// Get whether the authenticated user has liked this content, with timestamp.
+    /// Cache path: L1 → Redis (`ls:{user}:{type}:{id}`) → DB.
     pub async fn get_status(
         &self,
         user_id: Uuid,
@@ -109,6 +119,8 @@ impl LikeService {
             .await
     }
 
+    /// Get the user's liked items with cursor-based pagination.
+    /// First page (no cursor) is cached; subsequent pages hit the DB directly.
     pub async fn get_user_likes(
         &self,
         user_id: Uuid,
@@ -121,6 +133,8 @@ impl LikeService {
             .await
     }
 
+    /// Batch get like counts (max 100). Hottest path — uses MGET for cache hits,
+    /// falls back to DB with stampede coalescing for misses.
     pub async fn batch_counts(
         &self,
         items: &[(String, Uuid)],
@@ -128,6 +142,8 @@ impl LikeService {
         self.queries.batch_counts(items).await
     }
 
+    /// Batch get like statuses for the authenticated user (max 100).
+    /// Uses MGET on individual `ls:{user}:{type}:{id}` keys.
     pub async fn batch_statuses(
         &self,
         user_id: Uuid,
@@ -136,6 +152,8 @@ impl LikeService {
         self.queries.batch_statuses(user_id, items).await
     }
 
+    /// Get top liked content ranked by count within a time window.
+    /// Served from pre-computed Redis ZSETs (`lb:{window}`), refreshed periodically.
     pub async fn get_leaderboard(
         &self,
         content_type: Option<&str>,

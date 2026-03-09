@@ -14,6 +14,11 @@ use crate::repositories;
 use crate::services::like_count_cache::{LikeCountCache, map_db_error};
 use crate::services::like_events::LikeEventPublisher;
 
+/// Write-side service for like/unlike operations.
+///
+/// Each mutation: validates content (circuit-breaker-gated), performs the DB write
+/// in a transaction (INSERT/DELETE + count UPDATE), updates caches write-through,
+/// invalidates user-level caches, and publishes a real-time event.
 pub(crate) struct LikeCommandService {
     db: DbPools,
     cache: CacheManager,
@@ -45,6 +50,8 @@ impl LikeCommandService {
         }
     }
 
+    /// Like content. Idempotent — duplicate likes return `already_existed: true`
+    /// without incrementing the count. Atomic: DB insert + count update in one tx.
     pub(crate) async fn like(
         &self,
         user_id: Uuid,
@@ -111,6 +118,8 @@ impl LikeCommandService {
         }
     }
 
+    /// Unlike content. Idempotent — unliking non-liked content returns `was_liked: false`.
+    /// Atomic: DB delete + count update in one tx.
     pub(crate) async fn unlike(
         &self,
         user_id: Uuid,
@@ -187,6 +196,8 @@ impl LikeCommandService {
         self.cache.del_many(&[&key_all, &key_typed]).await;
     }
 
+    /// Validate content exists via the Content API, gated by the circuit breaker.
+    /// Cache hits do NOT signal the breaker (avoids masking upstream failures).
     async fn validate_content(&self, content_type: &str, content_id: Uuid) -> Result<(), AppError> {
         if !self.content_breaker.allow_request() {
             return Err(AppError::DependencyUnavailable("content_api".to_string()));

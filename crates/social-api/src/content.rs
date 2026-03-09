@@ -3,6 +3,8 @@ use shared::types::BatchItem;
 
 use crate::config::Config;
 
+/// Reject unknown content types early. Returns `ContentTypeUnknown` if the
+/// type has no `CONTENT_API_{TYPE}_URL` configured.
 pub fn ensure_registered_content_type(config: &Config, content_type: &str) -> Result<(), AppError> {
     if !config.is_valid_content_type(content_type) {
         return Err(AppError::ContentTypeUnknown(content_type.to_string()));
@@ -11,6 +13,7 @@ pub fn ensure_registered_content_type(config: &Config, content_type: &str) -> Re
     Ok(())
 }
 
+/// Validate all content types in an iterator, failing on the first unknown type.
 pub fn ensure_registered_content_types<'a>(
     config: &Config,
     content_types: impl IntoIterator<Item = &'a str>,
@@ -22,6 +25,7 @@ pub fn ensure_registered_content_types<'a>(
     Ok(())
 }
 
+/// Validate all content types in a batch request's items.
 pub fn ensure_registered_batch_items(config: &Config, items: &[BatchItem]) -> Result<(), AppError> {
     ensure_registered_content_types(config, items.iter().map(|item| item.content_type.as_str()))
 }
