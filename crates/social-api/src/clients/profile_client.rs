@@ -174,7 +174,7 @@ mod tests {
         use tokio::net::TcpListener;
 
         let app = Router::new().route(
-            "/*path",
+            "/{*path}",
             get(move || async move { (StatusCode::from_u16(status).unwrap(), body) }),
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
