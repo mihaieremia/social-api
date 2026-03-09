@@ -79,4 +79,4 @@ serial_test = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
 http-body-util = "0.1"
 tokio-stream = "0.1"
-nix = { version = "0.29", features = ["signal"] }
+nix = { workspace = true }

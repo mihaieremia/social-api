@@ -65,6 +65,7 @@ tonic-build = "0.13"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 serial_test = "3"
+nix = { version = "0.29", features = ["signal"] }
 
 # Shared crate
 shared = { path = "crates/shared" }
