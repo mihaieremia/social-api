@@ -310,4 +310,33 @@ mod tests {
         state.inflight_increment();
         assert_eq!(state2.inflight_count(), 1);
     }
+
+    #[tokio::test]
+    async fn test_state_all_accessors_do_not_panic() {
+        let harness = make_state().await;
+        let state = harness.state;
+
+        // Verify every accessor method returns without panicking.
+        let _ = state.db();
+        let _ = state.cache();
+        let _ = state.config();
+        let _ = state.http_client();
+        let _ = state.like_service();
+        let _ = state.token_validator();
+        let _ = state.profile_breaker();
+        let _ = state.pubsub_manager();
+        let _ = state.shutdown_token();
+    }
+
+    #[tokio::test]
+    async fn test_inflight_decrement_does_not_underflow() {
+        let harness = make_state().await;
+        let state = harness.state;
+
+        // Increment then decrement must return to zero.
+        state.inflight_increment();
+        assert_eq!(state.inflight_count(), 1);
+        state.inflight_decrement();
+        assert_eq!(state.inflight_count(), 0);
+    }
 }
