@@ -607,4 +607,77 @@ mod tests {
         // is_healthy -> false
         assert!(!cache.is_healthy().await);
     }
+
+    // -------------------------------------------------------------------------
+    // 8. del removes from both L1 and Redis
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_del_removes_from_l1_and_redis() {
+        let harness = make_cache().await;
+        let cache = harness.cache;
+        let key = "test:del_key";
+
+        // Set the key so it lives in both L1 and Redis
+        cache.set(key, "value_to_delete", 60).await;
+        assert_eq!(cache.get(key).await, Some("value_to_delete".to_string()));
+
+        // Delete and verify it is gone from both layers
+        cache.del(key).await;
+        assert_eq!(cache.get(key).await, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // 9. del_many removes multiple keys from both L1 and Redis
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_del_many_removes_multiple_keys() {
+        let harness = make_cache().await;
+        let cache = harness.cache;
+
+        let k1 = "test:del_many_k1";
+        let k2 = "test:del_many_k2";
+        let k3 = "test:del_many_k3";
+
+        cache.set(k1, "aaa", 60).await;
+        cache.set(k2, "bbb", 60).await;
+        cache.set(k3, "ccc", 60).await;
+
+        // Sanity-check all three are present
+        assert_eq!(cache.get(k1).await, Some("aaa".to_string()));
+        assert_eq!(cache.get(k2).await, Some("bbb".to_string()));
+        assert_eq!(cache.get(k3).await, Some("ccc".to_string()));
+
+        cache.del_many(&[k1, k2, k3]).await;
+
+        let keys: Vec<String> = vec![k1.to_string(), k2.to_string(), k3.to_string()];
+        let results = cache.mget(&keys).await;
+        assert_eq!(results, vec![None, None, None]);
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. del_many with empty slice is a no-op (must not panic)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_del_many_empty_slice_is_noop() {
+        let harness = make_cache().await;
+        let cache = harness.cache;
+        // Should return immediately without touching Redis or panicking
+        cache.del_many(&[]).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // 11. publish to a channel with no subscriber does not panic or error
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_publish_with_no_subscriber_does_not_panic() {
+        let harness = make_cache().await;
+        let cache = harness.cache;
+        // Fire-and-forget publish; no listener on this channel.
+        // The call must complete without panicking.
+        cache.publish("test:no_subscriber_channel", "hello").await;
+    }
 }
