@@ -45,6 +45,7 @@ pub fn install_signal_handler() -> CancellationToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
 
     #[tokio::test]
@@ -96,5 +97,43 @@ mod tests {
             completed,
             "cancelled() should resolve immediately after cancel()"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_sigint_cancels_token() {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let token = install_signal_handler();
+
+        // Allow the spawned task to register its signal listener before sending the signal.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        kill(Pid::this(), Signal::SIGINT).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), token.cancelled()).await;
+        assert!(result.is_ok(), "Token was not cancelled after SIGINT");
+        assert!(token.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn test_sigterm_cancels_token() {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let token = install_signal_handler();
+
+        // Allow the spawned task to register its signal listener before sending the signal.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        kill(Pid::this(), Signal::SIGTERM).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), token.cancelled()).await;
+        assert!(result.is_ok(), "Token was not cancelled after SIGTERM");
+        assert!(token.is_cancelled());
     }
 }
