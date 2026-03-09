@@ -243,13 +243,12 @@ async fn test_stream_receives_published_event() {
                     let text = String::from_utf8_lossy(&bytes);
                     if let Some(json_str) = text.lines().find(|l| l.starts_with("data:")) {
                         let json_str = json_str.trim_start_matches("data:").trim();
-                        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
-                        assert_eq!(
-                            parsed["event"], "like",
-                            "Expected like event, got: {}",
-                            parsed
-                        );
-                        return true;
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+                            && parsed["event"] == "like"
+                        {
+                            return true;
+                        }
+                        // heartbeat or other event — keep waiting
                     }
                 }
                 Ok(None) => return false,
