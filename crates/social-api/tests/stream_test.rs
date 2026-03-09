@@ -19,11 +19,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use shared::errors::AppError;
-use shared::types::AuthenticatedUser;
 use social_api::clients::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use social_api::clients::content_client::{ContentValidator, ValidationOutcome};
-use social_api::clients::profile_client::TokenValidator;
 use social_api::server::build_router;
 use social_api::services::like_service::LikeService;
 use social_api::state::AppState;
@@ -67,35 +63,6 @@ async fn test_stream_invalid_uuid_returns_400() {
 // ============================================================
 // Helpers for networked SSE tests (tests 3 & 4)
 // ============================================================
-
-/// Stub token validator: the Bearer token must be a valid UUID.
-struct StreamTestTokenValidator;
-
-#[async_trait::async_trait]
-impl TokenValidator for StreamTestTokenValidator {
-    async fn validate(&self, token: &str) -> Result<AuthenticatedUser, AppError> {
-        let user_id = Uuid::parse_str(token)
-            .map_err(|_| AppError::Unauthorized("token must be a UUID in tests".into()))?;
-        Ok(AuthenticatedUser {
-            user_id,
-            display_name: "Test User".to_string(),
-        })
-    }
-}
-
-/// Stub content validator: all content is valid.
-struct StreamTestContentValidator;
-
-#[async_trait::async_trait]
-impl ContentValidator for StreamTestContentValidator {
-    async fn validate(
-        &self,
-        _content_type: &str,
-        _content_id: Uuid,
-    ) -> Result<ValidationOutcome, AppError> {
-        Ok(ValidationOutcome::Remote(true))
-    }
-}
 
 /// Holds all resources for a networked test server (real TCP socket).
 struct NetworkedTestApp {
@@ -143,7 +110,7 @@ impl NetworkedTestApp {
         let like_service = LikeService::new_with_validator(
             context.db.clone(),
             context.cache.clone(),
-            Arc::new(StreamTestContentValidator),
+            Arc::new(common::TestContentValidator),
             context.config.clone(),
             content_breaker,
         );
@@ -153,7 +120,7 @@ impl NetworkedTestApp {
             context.cache.clone(),
             context.config.clone(),
             shutdown_token,
-            Box::new(StreamTestTokenValidator),
+            Box::new(common::TestTokenValidator),
             like_service,
         );
 
@@ -274,7 +241,14 @@ async fn test_stream_receives_published_event() {
             match response.chunk().await {
                 Ok(Some(bytes)) => {
                     let text = String::from_utf8_lossy(&bytes);
-                    if text.contains("data:") && text.contains("\"like\"") {
+                    if let Some(json_str) = text.lines().find(|l| l.starts_with("data:")) {
+                        let json_str = json_str.trim_start_matches("data:").trim();
+                        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+                        assert_eq!(
+                            parsed["event"], "like",
+                            "Expected like event, got: {}",
+                            parsed
+                        );
                         return true;
                     }
                 }
